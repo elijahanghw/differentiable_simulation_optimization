@@ -1,0 +1,20 @@
+from .pendulum.pendulum import Pendulum
+from .pendulum.pendulum_force import PendulumForce
+from .quadcopter.quadracing import QuadcopterRacing
+from .quad_2d.hover import Hover2d
+from .multicopter.hover import Hover3d
+
+
+ENV_REGISTRY = {
+    "pendulum": Pendulum,
+    "pendulum_force": PendulumForce,
+    "quad_racing": QuadcopterRacing,
+    "hover_2d": Hover2d,
+    "hover_3d": Hover3d
+}
+
+
+def make_env(name: str, **kwargs):
+    if name not in ENV_REGISTRY:
+        raise ValueError(f"Unknown environment '{name}'. Available: {list(ENV_REGISTRY)}")
+    return ENV_REGISTRY[name](**kwargs)
