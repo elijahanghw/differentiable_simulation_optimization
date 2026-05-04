@@ -5,14 +5,22 @@ env:
   name: hover_3d
   integrator: semi_implicit_euler
   train_morphology: true
+  alternating_alpha: false
 
 # -----------------------------------------------------------------------
 # Policy
 # -----------------------------------------------------------------------
+# policy:
+#   type: mlp
+#   squash_output: false
+#   hidden_sizes: [64, 64]   # input/output dims are inferred from the env
+
 policy:
-  type: mlp
+  type: gru
   squash_output: false
-  hidden_sizes: [64, 64]   # input/output dims are inferred from the env
+  encoder_sizes: [64]
+  hidden_size: [64]
+  head_sizes: [64]
 
 # -----------------------------------------------------------------------
 # Training
@@ -37,5 +45,5 @@ training:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/morph_optimal_hover_3d_logs.csv
-  checkpoint_path: checkpoints/morph_optimal_hover_3d.pkl
+  csv_path: logs/gru_morph_optimal_hover_3d_logs.csv
+  checkpoint_path: checkpoints/gru_morph_optimal_hover_3d.pkl

@@ -1,0 +1,104 @@
+# -----------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------
+env:
+  name: navigate
+  integrator: semi_implicit_euler
+  train_morphology: false
+  alternating_alpha: false
+  alpha_default: 0.0
+
+  # ---- Drone initial state bounds ----------------------------------------
+  init_x_min: 0.0
+  init_x_max: 2.0
+  init_y_min: 0.0
+  init_y_max: 2.0
+  init_z_min: -1.5
+  init_z_max: -1.5
+
+  # ---- Target spawn bounds -----------------------------------------------
+  target_x_min: 8.0
+  target_x_max: 10.0
+  target_y_min: 8.0
+  target_y_max: 10.0
+  target_z_min: -1.5
+  target_z_max: -1.5
+
+  # ---- Scene (random obstacles) -----------------------------------------
+  # All keys map directly to SceneConfig fields (see envs/multicopter/scene.py)
+  scene:
+    # Arena bounds — obstacles are spawned inside this box
+    arena_x_min: 2.0
+    arena_x_max: 8.0
+    arena_y_min: 0.0
+    arena_y_max: 10.0
+    arena_z_min: -3.0
+    arena_z_max: 0.0
+
+    # Density: expected obstacles per cubic metre of arena volume.
+    # Default arena is 4×4×4 m = 64 m³ → ~10 obstacles at density 0.15
+    obstacle_density: 0.05
+    sphere_fraction:  0.33
+    box_fraction:     0.33
+    # capsule_fraction = 1 - sphere_fraction - box_fraction = 20 % capsules
+
+    # Sphere size
+    sphere_r_min: 0.15
+    sphere_r_max: 0.60
+
+    # Box half-extents per axis
+    box_hx_min: 0.10
+    box_hx_max: 0.60
+    box_hy_min: 0.10
+    box_hy_max: 0.60
+    box_hz_min: 0.10
+    box_hz_max: 0.60
+
+    # Capsule size
+    capsule_r_min: 0.10
+    capsule_r_max: 0.40
+    capsule_hh_min: 0.30
+    capsule_hh_max: 1.20
+
+# -----------------------------------------------------------------------
+# Policy
+# -----------------------------------------------------------------------
+policy:
+  type: cnn_gru
+  squash_output: false
+  conv_features: [32, 64, 128]
+  kernel_sizes: [[2, 2], [3, 3], [3, 3]]
+  strides: [[2, 2], [1, 1], [1, 1]]
+  proj_dim: 192
+  leaky_slope: 0.05
+  hidden_size: 192
+
+# -----------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------
+training:
+  epochs: 50000
+  horizon: 150
+  batch_size: 64
+  lr: 1.0e-3
+  lr_min: 1.0e-5
+  grad_clip: 1.0
+  log_interval: 10
+
+# -----------------------------------------------------------------------
+# Depth camera
+# -----------------------------------------------------------------------
+depth_camera:
+  fov_deg: 90.0         # degrees — horizontal field of view
+  width: 32             # pixels
+  height: 24            # pixels
+  min_range: 0.3        # m  — closer than this → 0 (blind zone)
+  max_range: 3.0        # m  — farther / no-hit → max_range (saturated)
+  quantization_m: 0.001 # m  — depth step size (1 mm, matches uint16 output)
+
+# -----------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------
+logging:
+  csv_path: logs/navigate_logs.csv
+  checkpoint_path: checkpoints/navigate.pkl

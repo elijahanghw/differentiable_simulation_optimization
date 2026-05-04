@@ -1,0 +1,37 @@
+# -----------------------------------------------------------------------
+# Fixed drone with alternating alpha (no morphology optimisation)
+# -----------------------------------------------------------------------
+env:
+  name: hover_3d
+  integrator: semi_implicit_euler
+  train_morphology: false
+  alternating_alpha: true
+  alpha_default: -0.7854  # pi/4 radians = 45°
+
+# -----------------------------------------------------------------------
+# Policy
+# -----------------------------------------------------------------------
+policy:
+  type: mlp
+  squash_output: false
+  hidden_sizes: [64, 64]
+
+# -----------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------
+training:
+  epochs: 3000
+  horizon: 200
+  batch_size: 1024
+  lr: 3.0e-4
+  lr_min: 3.0e-4
+  grad_clip: 1.0
+  gamma: 0.99
+  log_interval: 10
+
+# -----------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------
+logging:
+  csv_path: logs/new_fa_fixed_hover_3d.csv
+  checkpoint_path: checkpoints/new_fa_fixed_hover_3d.pkl

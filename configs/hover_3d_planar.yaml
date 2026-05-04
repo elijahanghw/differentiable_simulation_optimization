@@ -1,0 +1,51 @@
+# -----------------------------------------------------------------------
+# Optimised drone (morphology + policy), no alternating alpha
+# -----------------------------------------------------------------------
+env:
+  name: hover_3d
+  integrator: semi_implicit_euler
+  train_morphology: false
+  alternating_alpha: false
+  alpha_default: 0.0
+
+# -----------------------------------------------------------------------
+# Policy
+# -----------------------------------------------------------------------
+# policy:
+#   type: mlp
+#   squash_output: false
+#   hidden_sizes: [64, 64]
+
+policy: 
+  type: gru
+  squash_output: false
+  encoder_sizes: [64]
+  hidden_sizes: [64]
+  head_sizes: [64]
+
+
+
+# -----------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------
+training:
+  epochs: 3000
+  morph_epochs: 2000
+  morphological_loss: true
+  morphological_loss_weight: 500.0
+  horizon: 200
+  batch_size: 1024
+  lr: 3.0e-4
+  lr_min: 3.0e-4
+  morph_lr: 5.0e-3
+  morph_lr_min: 1.0e-3
+  grad_clip: 1.0
+  gamma: 0.99
+  log_interval: 10
+
+# -----------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------
+logging:
+  csv_path: logs/test_planar_fixed_hover_3d_logs.csv
+  checkpoint_path: checkpoints/test_planar_fixed_hover_3d.pkl

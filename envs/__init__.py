@@ -1,16 +1,18 @@
 from .pendulum.pendulum import Pendulum
 from .pendulum.pendulum_force import PendulumForce
-from .quadcopter.quadracing import QuadcopterRacing
 from .quad_2d.hover import Hover2d
 from .multicopter.hover import Hover3d
+from .multicopter.navigate import Navigate
+from .pointmass.navigate import PointMassNavigate
 
 
 ENV_REGISTRY = {
     "pendulum": Pendulum,
     "pendulum_force": PendulumForce,
-    "quad_racing": QuadcopterRacing,
     "hover_2d": Hover2d,
-    "hover_3d": Hover3d
+    "hover_3d": Hover3d,
+    "navigate": Navigate,
+    "pointmass_navigate": PointMassNavigate,
 }
 
 

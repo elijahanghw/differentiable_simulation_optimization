@@ -24,7 +24,7 @@ import optax
 
 from envs import make_env
 from envs.multicopter.morphology import propeller_collision_loss_from_params
-from models import make_model
+from models import make_model, init_params
 from utils.logger import Logger
 from utils.checkpoint import save as save_checkpoint
 
@@ -33,18 +33,32 @@ from utils.checkpoint import save as save_checkpoint
 # Loss functions
 # ---------------------------------------------------------------------------
 
-def _build_loss_fn(env, policy, horizon: int, gamma: float):
-    discounts = gamma ** jnp.arange(horizon)
+def _build_loss_fn(env, policy, horizon: int):
+    has_hidden = hasattr(policy, "init_hidden")
+    has_depth  = hasattr(policy, "conv_features")
 
     def single_rollout(policy_params, init_state, init_obs):
-        def step(carry, discount):
-            state, obs = carry
-            action = policy.apply(policy_params, obs)
-            next_state, next_obs, reward, terminated, truncated, info = env.step(state, action)
-            return (next_state, next_obs), reward * discount
+        if has_hidden:
+            def step(carry, _):
+                state, obs, hidden = carry
+                if has_depth:
+                    depth_img, obs_vec = obs
+                    action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+                else:
+                    action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
+                next_state, next_obs, reward, terminated, truncated, info = env.step(state, action)
+                return (next_state, next_obs, new_hidden), reward
+            init_carry = (init_state, init_obs, policy.init_hidden())
+        else:
+            def step(carry, _):
+                state, obs = carry
+                action = policy.apply({"params": policy_params}, obs)
+                next_state, next_obs, reward, terminated, truncated, info = env.step(state, action)
+                return (next_state, next_obs), reward
+            init_carry = (init_state, init_obs)
 
-        (_, _), weighted_rewards = jax.lax.scan(step, (init_state, init_obs), discounts)
-        return jnp.sum(weighted_rewards)
+        (_, *_), rewards = jax.lax.scan(step, init_carry, None, length=horizon)
+        return jnp.mean(rewards)
 
     batch_rollout = jax.vmap(single_rollout, in_axes=(None, 0, 0))
 
@@ -53,21 +67,84 @@ def _build_loss_fn(env, policy, horizon: int, gamma: float):
         mean_return = jnp.mean(returns)
         return -mean_return, mean_return
 
-    return jax.jit(loss_fn)
+    return loss_fn
 
 
-def _build_loss_fn_morph(env, policy, horizon: int, gamma: float):
-    discounts = gamma ** jnp.arange(horizon)
+def _build_loss_fn_pointmass(env, policy, horizon: int):
+    """
+    DiffPhysDrone-style APG loss for PointMassNavigate.
+
+    The policy outputs 6-D raw actions in body frame.  The caller rotates
+    [:3] → a_pred and [3:] → v_pred to world frame before env.step().
+
+    A unique per-step PRNGKey is derived from each episode's base_key via
+    jax.random.fold_in(base_key, step_idx), so no key is carried in state.
+
+    After the full scan, env.compute_loss() assembles the multi-component
+    DiffPhysDrone loss from the accumulated trajectory arrays.
+    """
+
+    def single_rollout(policy_params, init_state, base_key):
+        hidden = policy.init_hidden()
+
+        def step(carry, step_idx):
+            state, hidden = carry
+            depth, obs_vec = env.get_obs(state)
+
+            raw_act, new_hidden = policy.apply(
+                {"params": policy_params}, depth, obs_vec, hidden
+            )  # (6,)
+
+            # Rotate body-frame output to world frame using current attitude
+            R      = state["R"]
+            a_pred = R @ raw_act[:3]
+            v_pred = R @ raw_act[3:]
+
+            new_state, step_data = env.step(state, a_pred, v_pred, base_key, step_idx)
+            return (new_state, new_hidden), step_data
+
+        _, traj = jax.lax.scan(
+            step, (init_state, hidden), jnp.arange(horizon, dtype=jnp.uint32)
+        )
+        return traj  # each leaf: (horizon, ...)
+
+    # vmap over batch: each leaf becomes (batch, horizon, ...)
+    batch_rollout = jax.vmap(single_rollout, in_axes=(None, 0, 0))
+
+    def loss_fn(policy_params, init_states, base_keys):
+        traj = batch_rollout(policy_params, init_states, base_keys)
+        total_loss, mean_return = env.compute_loss(traj)
+        return total_loss, mean_return
+
+    return loss_fn
+
+
+def _build_loss_fn_morph(env, policy, horizon: int):
+    has_hidden = hasattr(policy, "init_hidden")
+    has_depth  = hasattr(policy, "conv_features")
 
     def single_rollout(policy_params, morph_params, init_state, init_obs):
-        def step(carry, discount):
-            state, obs = carry
-            action = policy.apply(policy_params, obs)
-            next_state, next_obs, reward, terminated, truncated, info = env.step(state, action, morph_params)
-            return (next_state, next_obs), reward * discount
+        if has_hidden:
+            def step(carry, _):
+                state, obs, hidden = carry
+                if has_depth:
+                    depth_img, obs_vec = obs
+                    action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+                else:
+                    action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
+                next_state, next_obs, reward, terminated, truncated, info = env.step(state, action, morph_params)
+                return (next_state, next_obs, new_hidden), reward
+            init_carry = (init_state, init_obs, policy.init_hidden())
+        else:
+            def step(carry, _):
+                state, obs = carry
+                action = policy.apply({"params": policy_params}, obs)
+                next_state, next_obs, reward, terminated, truncated, info = env.step(state, action, morph_params)
+                return (next_state, next_obs), reward
+            init_carry = (init_state, init_obs)
 
-        (_, _), weighted_rewards = jax.lax.scan(step, (init_state, init_obs), discounts)
-        return jnp.sum(weighted_rewards)
+        (_, *_), rewards = jax.lax.scan(step, init_carry, None, length=horizon)
+        return jnp.mean(rewards)
 
     batch_rollout = jax.vmap(single_rollout, in_axes=(None, None, 0, 0))
 
@@ -76,7 +153,7 @@ def _build_loss_fn_morph(env, policy, horizon: int, gamma: float):
         mean_return = jnp.mean(returns)
         return -mean_return, mean_return
 
-    return jax.jit(loss_fn)
+    return loss_fn
 
 
 # ---------------------------------------------------------------------------
@@ -102,18 +179,25 @@ def train(config: Dict[str, Any]) -> Any:
 
     # -- Environment --------------------------------------------------------
     ecfg      = config["env"]
-    env       = make_env(ecfg["name"], **{k: v for k, v in ecfg.items() if k != "name"})
+    env_kwargs = {k: v for k, v in ecfg.items() if k != "name"}
+    if "depth_camera" in config:
+        env_kwargs["depth_camera"] = config["depth_camera"]
+    env       = make_env(ecfg["name"], **env_kwargs)
     has_morph      = hasattr(env, "init_morph") and getattr(env, "train_morphology", True)
     has_morph_info = hasattr(env, "get_morph_info")
+    has_diffdrone  = hasattr(env, "compute_loss")  # PointMassNavigate-style env
 
     # -- Policy -------------------------------------------------------------
-    pcfg        = config["policy"]
-    layer_sizes = [env.obs_dim] + pcfg["hidden_sizes"] + [env.act_dim]
-    policy      = make_model(pcfg["type"], layer_sizes=layer_sizes)
+    pcfg   = config["policy"]
+    policy = make_model(pcfg["type"], pcfg, env.obs_dim, env.act_dim)
 
     key = jax.random.PRNGKey(seed)
     key, init_key = jax.random.split(key)
-    policy_params = policy.init(init_key)
+    depth_shape = None
+    if pcfg["type"] == "cnn_gru" and hasattr(env, "cam_height"):
+        pool = getattr(env, "cam_pool", 2)
+        depth_shape = (env.cam_height // pool, env.cam_width // pool)
+    policy_params = init_params(policy, init_key, env.obs_dim, depth_shape=depth_shape)
 
     # -- Optimiser ----------------------------------------------------------
     policy_schedule = optax.linear_schedule(init_value=lr, end_value=lr_min, transition_steps=epochs)
@@ -123,7 +207,10 @@ def train(config: Dict[str, Any]) -> Any:
     )
     policy_opt_state = policy_optimizer.init(policy_params)
 
-    if has_morph:
+    if has_diffdrone:
+        loss_fn = _build_loss_fn_pointmass(env, policy, horizon)
+        grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+    elif has_morph:
         morph_params    = env.init_morph()
         morph_schedule  = optax.cosine_decay_schedule(init_value=morph_lr, decay_steps=morph_epochs, alpha=morph_lr_min / morph_lr)
         morph_optimizer = optax.chain(
@@ -131,8 +218,8 @@ def train(config: Dict[str, Any]) -> Any:
             optax.adam(morph_schedule, b1=0.5, b2=0.99),
         )
         morph_opt_state = morph_optimizer.init(morph_params)
-        loss_fn = _build_loss_fn_morph(env, policy, horizon, gamma)
-        grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
+        loss_fn = _build_loss_fn_morph(env, policy, horizon)
+        grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
 
         has_morphological_loss = (
             use_morph_loss
@@ -150,8 +237,8 @@ def train(config: Dict[str, Any]) -> Any:
                 )
             morphological_grad_fn = jax.jit(jax.value_and_grad(_morphological_loss_fn))
     else:
-        loss_fn = _build_loss_fn(env, policy, horizon, gamma)
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        loss_fn = _build_loss_fn(env, policy, horizon)
+        grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
 
     # -- Logger -------------------------------------------------------------
     log_cfg   = config.get("logging", {})
@@ -166,25 +253,45 @@ def train(config: Dict[str, Any]) -> Any:
     logger = Logger(csv_path, fields)
 
     # -- Info ---------------------------------------------------------------
-    n_params = sum(w.size + b.size for w, b in policy_params)
+    n_params = sum(x.size for x in jax.tree_util.tree_leaves(policy_params))
     print(f"Algo         : APG")
     print(f"Devices      : {jax.devices()}")
     print(f"Env          : {ecfg['name']}  |  obs_dim={env.obs_dim}  act_dim={env.act_dim}")
     print(f"Morphology   : {'yes' if has_morph else 'no'}")
-    print(f"Policy       : {pcfg['type']}  |  layers={layer_sizes}  params={n_params:,}")
+    print(f"Policy       : {pcfg['type']}  |  params={n_params:,}")
     print(f"Horizon      : {horizon}  |  batch={batch_size}  epochs={epochs}")
-    if has_morph:
+    if has_diffdrone:
+        print(f"Mode         : DiffPhysDrone loss (velocity-tracking + collision barriers)")
+        print(f"Optim        : Adam lr={lr}→{lr_min}  grad_clip={grad_clip}  grad_decay={getattr(env, 'grad_decay', 0.4)}")
+    elif has_morph:
         print(f"Optim        : Adam lr={lr}  morph_lr={morph_lr}  morph_epochs={morph_epochs}  grad_clip={grad_clip}  gamma={gamma}")
     else:
         print(f"Optim        : Adam lr={lr}  grad_clip={grad_clip}  gamma={gamma}")
     print("-" * 60)
 
     # -- Main loop ----------------------------------------------------------
-    for epoch in range(epochs):
-        key, state_key = jax.random.split(key)
-        init_obs, init_states, _ = jax.vmap(env.reset)(jax.random.split(state_key, batch_size))
+    reset_fn = jax.jit(jax.vmap(env.reset))
 
-        if has_morph:
+    for epoch in range(epochs):
+        key, state_key, noise_key = jax.random.split(key, 3)
+        init_obs, init_states, _ = reset_fn(jax.random.split(state_key, batch_size))
+
+        if has_diffdrone:
+            base_keys = jax.random.split(noise_key, batch_size)
+            (loss, mean_return), grads = grad_fn(policy_params, init_states, base_keys)
+            grad_norm = optax.global_norm(grads)
+
+            updates, policy_opt_state = policy_optimizer.update(grads, policy_opt_state)
+            policy_params = optax.apply_updates(policy_params, updates)
+
+            if epoch % log_every == 0:
+                logger.log({
+                    "epoch":       epoch,
+                    "mean_return": float(mean_return),
+                    "loss":        float(loss),
+                    "grad_norm":   float(grad_norm),
+                })
+        elif has_morph:
             (loss, mean_return), (policy_grads, morph_grads) = grad_fn(
                 policy_params, morph_params, init_states, init_obs
             )
@@ -235,7 +342,7 @@ def train(config: Dict[str, Any]) -> Any:
                     "grad_norm":   float(grad_norm),
                 })
 
-    save_checkpoint(ckpt_path, policy_params, morph_params if has_morph else None)
+    save_checkpoint(ckpt_path, policy_params, morph_params if (has_morph and not has_diffdrone) else None)
 
     print("-" * 60)
     print(f"Training complete. Log saved to {csv_path}")

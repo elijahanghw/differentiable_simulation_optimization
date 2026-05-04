@@ -7,7 +7,7 @@ algorithm specified by config["training"]["algo"] (default: "apg").
 Supported algorithms
 --------------------
   apg  — algos/apg.py   Analytic Policy Gradient (differentiable simulation)
-  ppo  — algos/ppo.py   Proximal Policy Optimisation
+  ppo  — algos/ppo.py   Proximal Policy Optimization
 
 Usage
 -----

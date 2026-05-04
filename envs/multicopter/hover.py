@@ -24,6 +24,7 @@ class Hover3d:
     alpha_min: float = -jnp.pi / 4  # -45°
     alpha_max: float =  jnp.pi / 4  #  45°
     alpha_default: float = 0.0
+    alternating_alpha: bool = True  # [+a, -a, +a] pattern for positive-y arms → full [+a,-a,+a,-a,+a,-a]
 
     train_morphology: bool = True
     integrator: str = "rk4"
@@ -120,9 +121,12 @@ class Hover3d:
             phi   = self.phi_min   + (self.phi_max   - self.phi_min)   * jax.nn.sigmoid(morph_params["phi_raw"])   # (3,)
             alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * jax.nn.sigmoid(morph_params["alpha_raw"]) # (3,)
         else:
-            l     = jnp.full(3, self.l_default)
-            phi   = jnp.full(3, self.phi_default)
-            alpha = jnp.full(3, self.alpha_default)
+            l   = jnp.full(3, self.l_default)
+            phi = jnp.full(3, self.phi_default)
+            if self.alternating_alpha:
+                alpha = jnp.array([self.alpha_default, -self.alpha_default, self.alpha_default])
+            else:
+                alpha = jnp.full(3, self.alpha_default)
 
         Bf, Bm, m, J, J_inv = morphology(l, phi, alpha)
 
@@ -158,9 +162,23 @@ class Hover3d:
     # Morphology
     # ------------------------------------------------------------------
 
+    def _alpha_to_raw(self, alpha_val: float) -> float:
+        """Inverse sigmoid: map alpha value to raw logit parameter."""
+        normalized = (alpha_val - self.alpha_min) / (self.alpha_max - self.alpha_min)
+        normalized = jnp.clip(normalized, 1e-6, 1.0 - 1e-6)
+        return jnp.log(normalized / (1.0 - normalized))
+
     def init_morph(self) -> dict:
         # raw = 0 → sigmoid(0) = 0.5 → midpoint of bounds for all params
-        return {"l_raw": jnp.zeros(3), "phi_raw": jnp.zeros(3), "alpha_raw": jnp.zeros(3)}
+        if self.alternating_alpha:
+            alpha_raw = jnp.array([
+                self._alpha_to_raw( self.alpha_default),
+                self._alpha_to_raw(-self.alpha_default),
+                self._alpha_to_raw( self.alpha_default),
+            ])
+        else:
+            alpha_raw = jnp.zeros(3)
+        return {"l_raw": jnp.zeros(3), "phi_raw": jnp.zeros(3), "alpha_raw": alpha_raw}
 
     def get_l(self, morph_params: dict) -> jnp.ndarray:
         return self.l_min + (self.l_max - self.l_min) * jax.nn.sigmoid(morph_params["l_raw"])
