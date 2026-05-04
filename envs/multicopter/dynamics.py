@@ -1,5 +1,24 @@
+import jax
 import jax.numpy as jnp
 from .quat_math import *
+
+
+# ---------------------------------------------------------------------------
+# Gradient-decay helper (identity forward, scaled backward)
+# ---------------------------------------------------------------------------
+
+@jax.custom_vjp
+def _gdecay(x, factor):
+    return x
+
+def _gdecay_fwd(x, factor):
+    return x, (jnp.asarray(factor),)
+
+def _gdecay_bwd(res, g):
+    (factor,) = res
+    return g * factor, jnp.zeros_like(factor)
+
+_gdecay.defvjp(_gdecay_fwd, _gdecay_bwd)
 
 G = 9.81
 LINEAR_DAMPING  = 0.1   # N·s/m

@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "depth_re
 
 import jax
 import jax.numpy as jnp
-from .dynamics import forward_euler, semi_implicit_euler, rk4
+from .dynamics import forward_euler, semi_implicit_euler, rk4, _gdecay
 from .morphology import morphology
 from .quat_math import euler_to_quat, quat_to_euler
 from .scene import SceneConfig
@@ -41,7 +41,10 @@ class Navigate:
     # ---- Drone --------------------------------------------------------
     obs_dim: int = 18
     act_dim: int = 6
-    dt: float = 0.05
+    dt: float = 1/15
+
+    # ---- Gradient decay -----------------------------------------------
+    grad_decay: float = 0.4
 
     # ---- Collision loss -----------------------------------------------
     b1: float = 1.0
@@ -51,6 +54,7 @@ class Navigate:
     cam_fov_deg:       float = 90.0
     cam_width:         int   = 64
     cam_height:        int   = 48
+    cam_pool:          int   = 4      # max-pool factor → (12, 16) input to CNN
     cam_min_range:     float = 0.2
     cam_max_range:     float = 8.0
     cam_quantization_m: float = 0.001
@@ -108,6 +112,7 @@ class Navigate:
             self.cam_quantization_m = float(dc.get("quantization_m", self.cam_quantization_m))
 
         self.state_dim = 22 + self.scene_cfg.scene_dim
+        self._gd_factor = float(self.grad_decay ** self.dt)
 
     # -----------------------------------------------------------------------
     # Reset
@@ -198,7 +203,6 @@ class Navigate:
                 sphere_centers   = arrays["sphere_centers"],
                 sphere_radii     = arrays["sphere_radii"],
                 box_centers      = arrays["box_centers"],
-                box_quaternions  = arrays["box_quaternions"],
                 box_half_extents = arrays["box_half_extents"],
                 capsule_centers  = arrays["capsule_centers"],
                 capsule_axes     = arrays["capsule_axes"],
@@ -209,22 +213,6 @@ class Navigate:
             max_range      = self.cam_max_range,
             quantization_m = self.cam_quantization_m,
         )
-    
-    # def _get_processed_depth(self, state: jnp.ndarray) -> jnp.ndarray:
-    #     raw_depth = self.get_depth(state)
-    #     clamped = jnp.clip(raw_depth, self.cam_min_range, self.cam_max_range)
-    #     inverted_depth = 1.0 / clamped
-    #     min_inv = 1.0 / self.cam_max_range
-    #     max_inv = 1.0 / self.cam_min_range
-    #     normalized_depth = (inverted_depth - min_inv) / (max_inv - min_inv)
-    #     return jax.lax.reduce_window(
-    #         normalized_depth,
-    #         init_value=-jnp.inf,
-    #         computation=jax.lax.max,
-    #         window_dimensions=(2, 2),
-    #         window_strides=(2, 2),
-    #         padding="VALID",
-    #     )
     
     def _get_processed_depth(self, state):
         raw   = self._get_depth(state)
@@ -287,7 +275,7 @@ class Navigate:
         U = jnp.clip(action, -1.0, 1.0)
 
         integrators = {"euler": forward_euler, "semi_implicit_euler": semi_implicit_euler, "rk4": rk4}
-        next_drone   = integrators[self.integrator](state[0:19], U, Bf, Bm, m, J, J_inv, self.dt)
+        next_drone   = integrators[self.integrator](_gdecay(state[0:19], self._gd_factor), U, Bf, Bm, m, J, J_inv, self.dt)
 
         # Renormalize quaternion, clip velocities
         quat_norm = jnp.maximum(jnp.linalg.norm(next_drone[6:10]), 1e-8)
@@ -298,39 +286,44 @@ class Navigate:
         # Target + scene are frozen; append unchanged
         next_state = jnp.concatenate([next_drone, state[19:]])
 
-        # ---- Reward/Loss ------------------------------------------
-        position_loss = jnp.linalg.norm(next_drone[0:3] - state[19:22])
-        rate_loss = jnp.linalg.norm(next_drone[10:13])
         dist = self._get_nearest_obstacle_dist(next_state)
-        collision_loss = jnp.maximum(1.0 - dist, 0.0)**2 + self.b1 * jax.nn.softplus(self.b2 * (-dist))
-        reward = -position_loss - rate_loss - collision_loss
-
-        return next_state, self._get_obs(next_state), reward, jnp.bool_(False), jnp.bool_(False), {}
+        step_data = {
+            "pos":        next_state[0:3],
+            "target_pos": next_state[19:22],
+            "omega":      next_state[10:13],
+            "dist":       dist,
+        }
+        return next_state, step_data
     
     def compute_loss(self, traj):
-        v            = traj["v"]              # (B, T, 3)
-        target_v     = traj["target_v_world"] # (B, T, 3)
-        dist         = traj["dist"]           # (B, T)
-        a_cmd        = traj["a_cmd"]          # (B, T, 3)
-        v_pred       = traj["v_pred"]         # (B, T, 3)
-        drone_radius = traj["drone_radius"]   # (B, T)
+        """
+        Trajectory loss from a full rollout.
 
-        # -- Position loss -----------------------------------------------------
+        traj: dict of (batch, horizon, ...) arrays stacked by vmap+scan.
 
-        # -- Rate loss ---------------------------------------------------------
+        Returns: (total_loss, mean_return) — mean_return = -total_loss
+        """
+        pos    = traj["pos"]        # (B, T, 3)
+        target = traj["target_pos"] # (B, T, 3)
+        omega  = traj["omega"]      # (B, T, 3)
+        dist   = traj["dist"]       # (B, T)
 
-        # -- Collision losses --------------------------------------------------
-        # Rate of approach from consecutive distance samples
-        dist_diff = jnp.diff(dist, axis=1)                    # (B, T-1)
-        v_to_pt   = jnp.clip(-dist_diff / self.dt, 1.0, None) # (B, T-1)
-        clearance = dist[:, 1:] - drone_radius[:, 1:]          # (B, T-1)
+        diff   = pos - target
+        loss_xy = jnp.mean(jnp.sqrt(jnp.sum(diff[..., :2] ** 2, axis=-1) + 1e-8))
+        loss_z  = jnp.mean(jnp.abs(diff[..., 2]))
+        loss_rate = jnp.mean(jnp.sqrt(jnp.sum(omega ** 2, axis=-1) + 1e-8))
+        dist_diff = jnp.diff(dist, axis=1)                                          # (B, T-1)
+        v_to_pt   = jax.lax.stop_gradient(jnp.clip(-dist_diff / self.dt, 1.0, None)) # (B, T-1)
+        loss_collision = jnp.mean(
+            (jnp.maximum(1.0 - dist[:, 1:], 0.0) ** 2
+            + self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:])))
+            * v_to_pt
+        )
 
-        # Softplus: exponential penalty when drone body is inside obstacle
-        loss_collide = jnp.mean(jax.nn.softplus(-32.0 * clearance) * v_to_pt)
+        total = loss_xy + loss_z + 0.001*loss_rate + 32.0*loss_collision
+        return total, -total
 
-        # Quadratic barrier: penalises approaching within 1 m of collision
-        loss_obj  = jnp.mean(v_to_pt * jax.nn.relu(1.0 - clearance) ** 2)
-    
+
 
     # -----------------------------------------------------------------------
     # Morphology (kept for compatibility)

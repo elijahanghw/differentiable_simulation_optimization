@@ -119,6 +119,55 @@ def _build_loss_fn_pointmass(env, policy, horizon: int):
     return loss_fn
 
 
+def _build_loss_fn_multicopter_traj(env, policy, horizon: int):
+    """
+    Trajectory-based APG loss for multicopter Navigate.
+
+    Collects the full rollout via jax.lax.scan, then calls env.compute_loss()
+    once on the accumulated trajectory — matching the PointMassNavigate pattern
+    but adapted for flat-array state and the standard 6-D action space.
+    """
+    has_hidden = hasattr(policy, "init_hidden")
+    has_depth  = hasattr(policy, "conv_features")
+
+    def single_rollout(policy_params, init_state):
+        init_obs = env._get_obs(init_state)
+
+        if has_hidden:
+            def step(carry, _):
+                state, obs, hidden = carry
+                if has_depth:
+                    depth_img, obs_vec = obs
+                    action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+                else:
+                    action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
+                new_state, step_data = env.step(state, action)
+                new_obs = env._get_obs(new_state)
+                return (new_state, new_obs, new_hidden), step_data
+            init_carry = (init_state, init_obs, policy.init_hidden())
+        else:
+            def step(carry, _):
+                state, obs = carry
+                action = policy.apply({"params": policy_params}, obs)
+                new_state, step_data = env.step(state, action)
+                new_obs = env._get_obs(new_state)
+                return (new_state, new_obs), step_data
+            init_carry = (init_state, init_obs)
+
+        _, traj = jax.lax.scan(step, init_carry, None, length=horizon)
+        return traj  # each leaf: (horizon, ...)
+
+    # vmap over batch: each leaf becomes (batch, horizon, ...)
+    batch_rollout = jax.vmap(single_rollout, in_axes=(None, 0))
+
+    def loss_fn(policy_params, init_states):
+        traj = batch_rollout(policy_params, init_states)
+        total_loss, mean_return = env.compute_loss(traj)
+        return total_loss, mean_return
+
+    return loss_fn
+
+
 def _build_loss_fn_morph(env, policy, horizon: int):
     has_hidden = hasattr(policy, "init_hidden")
     has_depth  = hasattr(policy, "conv_features")
@@ -185,7 +234,10 @@ def train(config: Dict[str, Any]) -> Any:
     env       = make_env(ecfg["name"], **env_kwargs)
     has_morph      = hasattr(env, "init_morph") and getattr(env, "train_morphology", True)
     has_morph_info = hasattr(env, "get_morph_info")
-    has_diffdrone  = hasattr(env, "compute_loss")  # PointMassNavigate-style env
+    # PointMassNavigate exposes compute_loss + public get_obs; multicopter Navigate
+    # exposes compute_loss + private _get_obs only.
+    has_diffdrone  = hasattr(env, "compute_loss") and hasattr(env, "get_obs")
+    has_traj_loss  = hasattr(env, "compute_loss") and not hasattr(env, "get_obs")
 
     # -- Policy -------------------------------------------------------------
     pcfg   = config["policy"]
@@ -209,6 +261,9 @@ def train(config: Dict[str, Any]) -> Any:
 
     if has_diffdrone:
         loss_fn = _build_loss_fn_pointmass(env, policy, horizon)
+        grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+    elif has_traj_loss:
+        loss_fn = _build_loss_fn_multicopter_traj(env, policy, horizon)
         grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
     elif has_morph:
         morph_params    = env.init_morph()
@@ -263,6 +318,9 @@ def train(config: Dict[str, Any]) -> Any:
     if has_diffdrone:
         print(f"Mode         : DiffPhysDrone loss (velocity-tracking + collision barriers)")
         print(f"Optim        : Adam lr={lr}→{lr_min}  grad_clip={grad_clip}  grad_decay={getattr(env, 'grad_decay', 0.4)}")
+    elif has_traj_loss:
+        print(f"Mode         : Trajectory loss (position + rate + collision barriers)")
+        print(f"Optim        : Adam lr={lr}→{lr_min}  grad_clip={grad_clip}")
     elif has_morph:
         print(f"Optim        : Adam lr={lr}  morph_lr={morph_lr}  morph_epochs={morph_epochs}  grad_clip={grad_clip}  gamma={gamma}")
     else:
@@ -279,6 +337,20 @@ def train(config: Dict[str, Any]) -> Any:
         if has_diffdrone:
             base_keys = jax.random.split(noise_key, batch_size)
             (loss, mean_return), grads = grad_fn(policy_params, init_states, base_keys)
+            grad_norm = optax.global_norm(grads)
+
+            updates, policy_opt_state = policy_optimizer.update(grads, policy_opt_state)
+            policy_params = optax.apply_updates(policy_params, updates)
+
+            if epoch % log_every == 0:
+                logger.log({
+                    "epoch":       epoch,
+                    "mean_return": float(mean_return),
+                    "loss":        float(loss),
+                    "grad_norm":   float(grad_norm),
+                })
+        elif has_traj_loss:
+            (loss, mean_return), grads = grad_fn(policy_params, init_states)
             grad_norm = optax.global_norm(grads)
 
             updates, policy_opt_state = policy_optimizer.update(grads, policy_opt_state)

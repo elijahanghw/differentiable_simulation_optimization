@@ -11,9 +11,8 @@ The flat layout inside scene_array:
     [0         : Ns*3      ]  sphere centres   (Ns, 3)
     [Ns*3      : Ns*4      ]  sphere radii     (Ns,)
     [Ns*4      : Ns*4+Nb*3 ]  box centres      (Nb, 3)
-    [Ns*4+Nb*3 : Ns*4+Nb*7 ]  box quaternions  (Nb, 4)  [qw, qx, qy, qz]
-    [Ns*4+Nb*7 : Ns*4+Nb*10]  box half-extents (Nb, 3)
-    [Ns*4+Nb*10: Ns*4+Nb*10+Nc*8]  capsule params (Nc, 8)
+    [Ns*4+Nb*3 : Ns*4+Nb*6 ]  box half-extents (Nb, 3)  — AABB only, no rotation
+    [Ns*4+Nb*6 : Ns*4+Nb*6+Nc*8]  capsule params (Nc, 8)
         per capsule: [cx, cy, cz, ax, ay, az, half_h, r]
         where (ax,ay,az) is the unit axis of the capsule
 
@@ -154,8 +153,7 @@ class SceneConfig:
             sphere_centers    (Ns, 3)
             sphere_radii      (Ns,)
             box_centers       (Nb, 3)
-            box_quaternions   (Nb, 4)  [qw, qx, qy, qz] unit quaternions
-            box_half_extents  (Nb, 3)
+            box_half_extents  (Nb, 3)  — axis-aligned boxes (no rotation)
             capsule_centers   (Nc, 3)
             capsule_axes      (Nc, 3)   unit axes
             capsule_hh        (Nc,)     half-heights
@@ -188,8 +186,7 @@ class SceneConfig:
             * (self.arena_z_max - self.arena_z_min)
         )
         return (
-            f"SceneConfig  density={self.obstacle_density}/m³  "
-            f"arena={vol:.1f}m³  "
+            f"SceneConfig  arena={vol:.1f}m³  "
             f"Ns={self.n_spheres}  Nb={self.n_boxes}  Nc={self.n_capsules}  "
             f"scene_dim={self.scene_dim}"
         )
