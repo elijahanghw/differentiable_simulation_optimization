@@ -41,14 +41,14 @@ class Navigate:
     # ---- Drone --------------------------------------------------------
     obs_dim: int = 18
     act_dim: int = 6
-    dt: float = 1/15
+    dt: float = 0.01 # 1/15
 
     # ---- Gradient decay -----------------------------------------------
     grad_decay: float = 0.4
 
     # ---- Collision loss -----------------------------------------------
     b1: float = 1.0
-    b2: float = 1.0
+    b2: float = 32.0
 
     # ---- Depth camera ------------------------------------------------------
     cam_fov_deg:       float = 90.0
@@ -175,7 +175,7 @@ class Navigate:
 
     def _get_obs(self, state: jnp.ndarray) -> jnp.ndarray:
         rel_pos = state[0:3] - state[19:22]
-        euler = quat_to_euler(state[6:10])
+        euler = jax.lax.stop_gradient(quat_to_euler(state[6:10]))
         drone_states = jnp.concatenate([rel_pos, state[3:6], euler, state[10:13], state[13:19]])
         depth_map = jax.lax.stop_gradient(self._get_processed_depth(state))
         return (depth_map, drone_states)
@@ -315,12 +315,13 @@ class Navigate:
         dist_diff = jnp.diff(dist, axis=1)                                          # (B, T-1)
         v_to_pt   = jax.lax.stop_gradient(jnp.clip(-dist_diff / self.dt, 1.0, None)) # (B, T-1)
         loss_collision = jnp.mean(
-            (jnp.maximum(1.0 - dist[:, 1:], 0.0) ** 2
-            + self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:])))
-            * v_to_pt
+            (self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:])))* v_to_pt
+        )
+        loss_obj = jnp.mean(
+            (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
-        total = loss_xy + loss_z + 0.001*loss_rate + 32.0*loss_collision
+        total = loss_xy + loss_z + 0.001*loss_rate + 7.5*loss_collision + 3.0*loss_obj
         return total, -total
 
 

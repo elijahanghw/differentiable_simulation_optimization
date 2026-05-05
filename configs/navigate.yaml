@@ -18,10 +18,10 @@ env:
   init_z_max: -1.5
 
   # ---- Target spawn bounds -----------------------------------------------
-  target_x_min: 8.0
-  target_x_max: 10.0
-  target_y_min: 8.0
-  target_y_max: 10.0
+  target_x_min: 3 #8.0
+  target_x_max: 5 # 10.0
+  target_y_min: -1 # 8.0
+  target_y_max: 1 # 10.0
   target_z_min: -1.5
   target_z_max: -1.5
 
@@ -37,9 +37,9 @@ env:
     arena_z_max: 0.0
 
     # Obstacle counts
-    n_spheres:  10
-    n_boxes:    10
-    n_capsules: 10
+    n_spheres:  0
+    n_boxes:    0
+    n_capsules: 0
 
     # Sphere size
     sphere_r_min: 0.15
