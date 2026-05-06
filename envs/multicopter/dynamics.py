@@ -55,19 +55,32 @@ def dynamics(world_states:jnp.array, U: jnp.array, Bf: jnp.array, Bm: jnp.array,
     return jnp.concatenate([d_pos, d_vel, d_quat, d_omega, d_w])
 
 
+def motor_zoh(w: jnp.ndarray, U: jnp.ndarray, dt: float) -> jnp.ndarray:
+    """Exact solution of dw/dt = (U-w)/TIME_CONSTANT for constant U over [0, dt].
+
+    Replaces the Euler-integrated w from the integrators when dt > TIME_CONSTANT.
+    Unconditionally stable for any dt/TIME_CONSTANT ratio.
+      ∂w_new/∂w = exp(-dt/τ)       < 1  always
+      ∂w_new/∂U = 1-exp(-dt/τ)    < 1  always
+    """
+    alpha = jnp.exp(jnp.asarray(-dt / TIME_CONSTANT))
+    return alpha * w + (1.0 - alpha) * U
+
+
 def forward_euler(state, U, Bf, Bm, m, J, J_inv, dt):
-    return state + dt * dynamics(state, U, Bf, Bm, m, J, J_inv)
+    next_state = state + dt * dynamics(state, U, Bf, Bm, m, J, J_inv)
+    return next_state.at[13:19].set(motor_zoh(state[13:19], U, dt))
 
 
 def semi_implicit_euler(state, U, Bf, Bm, m, J, J_inv, dt):
     d = dynamics(state, U, Bf, Bm, m, J, J_inv)
     new_vel   = state[3:6]   + dt * d[3:6]
     new_omega = state[10:13] + dt * d[10:13]
-    new_W     = state[13:19] + dt * d[13:19]
     new_pos   = state[0:3]   + dt * new_vel
     omega_quat = jnp.concatenate([jnp.array([0.0]), new_omega])
     new_quat = state[6:10] + dt * 0.5 * quat_mul(state[6:10], omega_quat)
     new_quat = new_quat / jnp.linalg.norm(new_quat)
+    new_W    = motor_zoh(state[13:19], U, dt)
     return jnp.concatenate([new_pos, new_vel, new_quat, new_omega, new_W])
 
 
@@ -76,4 +89,5 @@ def rk4(state, U, Bf, Bm, m, J, J_inv, dt):
     k2 = dynamics(state + 0.5*dt*k1, U, Bf, Bm, m, J, J_inv)
     k3 = dynamics(state + 0.5*dt*k2, U, Bf, Bm, m, J, J_inv)
     k4 = dynamics(state +     dt*k3, U, Bf, Bm, m, J, J_inv)
-    return state + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+    next_state = state + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+    return next_state.at[13:19].set(motor_zoh(state[13:19], U, dt))

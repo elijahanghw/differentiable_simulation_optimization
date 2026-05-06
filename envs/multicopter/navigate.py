@@ -41,7 +41,7 @@ class Navigate:
     # ---- Drone --------------------------------------------------------
     obs_dim: int = 18
     act_dim: int = 6
-    dt: float = 0.01 # 1/15
+    dt: float = 1/15
 
     # ---- Gradient decay -----------------------------------------------
     grad_decay: float = 0.4
