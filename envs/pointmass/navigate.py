@@ -127,7 +127,7 @@ class PointMassNavigate:
     cam_width:         int   = 64
     cam_height:        int   = 48
     cam_pool:          int   = 4      # max-pool factor → (12, 16) input to CNN
-    cam_angle_deg:     float = 20.0   # downward pitch from drone forward axis
+    cam_angle_deg:     float = 20.0   # upward pitch from drone forward axis (matches DiffPhysDrone)
     cam_min_range:     float = 0.2
     cam_max_range:     float = 24.0
     cam_quantization_m: float = 0.001
@@ -215,7 +215,7 @@ class PointMassNavigate:
 
         # Initial drone state
         p_xy = self.init_pos_std * jax.random.normal(next(ki), shape=(2,))
-        p    = jnp.array([p_xy[0], p_xy[1], -1.5])
+        p    = jnp.array([p_xy[0], p_xy[1], 1.5])
         v  = self.init_vel_std * jax.random.normal(next(ki), shape=(3,))
         a  = jnp.zeros(3)
         dg = jnp.zeros(3)
@@ -223,7 +223,7 @@ class PointMassNavigate:
         # Target position
         tx = jax.random.uniform(next(ki), minval=self.target_x_min, maxval=self.target_x_max)
         ty = jax.random.uniform(next(ki), minval=-self.target_yz_rng, maxval=self.target_yz_rng)
-        target_pos = jnp.array([tx, ty, -1.5])
+        target_pos = jnp.array([tx, ty, 1.5])
 
         # Initial attitude: up = world-z, forward = toward target (horizontal)
         to_tgt     = target_pos - p
@@ -345,12 +345,13 @@ class PointMassNavigate:
     # -----------------------------------------------------------------------
 
     def _get_camera_quat(self, R):
-        """Apply downward pitch and convert to quaternion for the renderer."""
+        """Apply upward pitch and convert to quaternion for the renderer."""
         c, s = self._cam_cos, self._cam_sin
-        cam_fwd  =  c * R[:, 0] - s * R[:, 2]
+        cam_fwd  =  c * R[:, 0] + s * R[:, 2]
         cam_left =  R[:, 1]
-        cam_up   =  s * R[:, 0] + c * R[:, 2]
-        R_cam    = jnp.stack([cam_fwd, cam_left, cam_up], axis=1)
+        cam_up   = -s * R[:, 0] + c * R[:, 2]
+        # Renderer uses NED body frame (X=fwd, Y=right, Z=down); negate left→right, up→down
+        R_cam    = jnp.stack([cam_fwd, -cam_left, -cam_up], axis=1)
         return _rotmat_to_quat(R_cam)
 
     def _get_processed_depth(self, state):
@@ -396,11 +397,11 @@ class PointMassNavigate:
         arrays = self.scene_cfg.unpack(state["scene"])
         dist   = jnp.inf
 
-        # Ground plane at z = -1 (normal pointing up)
+        # Ground plane at z = 0 (FLU/z-up: outward normal [0,0,1] points up)
         dist = jnp.minimum(dist,
             point_plane_dist(pos,
-                jnp.array([0.0, 0.0, -1.0]),
-                jnp.array([0.0, 0.0,  1.0])))
+                jnp.array([0.0, 0.0, 0.0]),
+                jnp.array([0.0, 0.0, 1.0])))
 
         if arrays["sphere_centers"].shape[0] > 0:
             ds = jax.vmap(lambda c, r: point_sphere_dist(pos, c, r))(

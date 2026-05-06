@@ -17,9 +17,9 @@ where G(x) is the identity in the forward pass but multiplies the gradient by
 grad_decay^dt in the backward pass (gradient truncation for training stability).
 
 Attitude update (R has columns [forward, left, up] in world frame):
-    up  = normalise(act_cmd)
-    fwd = blend(normalise(v_pred), R[:,0]; α = exp(-yaw_delay*dt))
-    fwd = orthogonalise(fwd, up) → normalise
+    up  = normalise(act_cmd + [0,0,9.8])          # thrust direction (gravity offset)
+    fwd = blend(normalise(R[:,0]*5 + v_pred), R[:,0]; α = exp(-yaw_delay*dt))
+    fwd = orthogonalise(fwd, up) → normalise      # preserve fwd[0,1], solve fwd[2]
     R_new = [fwd | cross(up,fwd) | up]
 """
 
@@ -107,13 +107,18 @@ def dynamics_step(p, v, a, dg, R, act_pred, key,
 # Attitude update
 # ---------------------------------------------------------------------------
 
+_GRAVITY     = 9.80665
+_YAW_INERTIA = 5.0
+
+
 def update_attitude(R, act, v_pred, yaw_ctl_delay, dt):
     """
     Update body-frame rotation matrix from thrust direction + velocity blend.
+    Matches the DiffPhysDrone CUDA kernel (dynamics_kernel.cu update_state_vec).
 
     Args:
         R             : (3,3) current rotation matrix; columns [fwd, left, up]
-        act           : (3,) current acceleration command (thrust proxy)
+        act           : (3,) net acceleration command (gravity already compensated)
         v_pred        : (3,) predicted velocity in world frame
         yaw_ctl_delay : scalar — yaw dynamics stiffness (~6)
         dt            : scalar — timestep (s)
@@ -123,14 +128,23 @@ def update_attitude(R, act, v_pred, yaw_ctl_delay, dt):
     """
     yaw_alpha = jnp.exp(-yaw_ctl_delay * dt)
 
-    # Up = thrust direction (normalised)
-    up = act / jnp.sqrt(jnp.dot(act, act) + 1e-8)
+    # Up = body-frame up axis in world coords (thrust direction).
+    # act is net accel (gravity compensated), so add gravity back to recover
+    # the actual thrust vector. Matches CUDA: az += 9.80665 before normalising.
+    thr = act + jnp.array([0.0, 0.0, _GRAVITY])
+    up  = thr / jnp.sqrt(jnp.dot(thr, thr) + 1e-8)
 
-    # Forward: blend v_pred direction with current forward, then orthogonalise
-    v_unit = v_pred / jnp.sqrt(jnp.dot(v_pred, v_pred) + 1e-8)
-    fwd    = v_unit * (1.0 - yaw_alpha) + R[:, 0] * yaw_alpha
-    fwd    = fwd - jnp.dot(fwd, up) * up
-    fwd    = fwd / jnp.sqrt(jnp.dot(fwd, fwd) + 1e-8)
+    # Forward: bias the target direction toward current fwd (yaw inertia=5),
+    # then IIR-blend with current fwd via alpha.  Matches CUDA yaw_inertia=5.
+    fwd_blend = R[:, 0] * _YAW_INERTIA + v_pred
+    fwd_blend = fwd_blend / jnp.sqrt(jnp.dot(fwd_blend, fwd_blend) + 1e-8)
+    fwd = R[:, 0] * yaw_alpha + fwd_blend * (1.0 - yaw_alpha)
+
+    # Orthogonalise: solve fwd · up = 0 for fwd[2], preserving fwd[0] and fwd[1].
+    # Matches CUDA: fz = (fx*ux + fy*uy) / -uz
+    fwd_z = -(fwd[0] * up[0] + fwd[1] * up[1]) / (up[2] + 1e-8)
+    fwd   = fwd.at[2].set(fwd_z)
+    fwd   = fwd / jnp.sqrt(jnp.dot(fwd, fwd) + 1e-8)
 
     left = jnp.cross(up, fwd)
 
