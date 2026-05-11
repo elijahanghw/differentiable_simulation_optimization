@@ -50,6 +50,10 @@ class Navigate:
     b1: float = 1.0
     b2: float = 32.0
 
+    # ---- Perception loss ----------------------------------------------
+    perception_pitch_limit: float = jnp.pi / 6   # ±30°
+    perception_weight:      float = 5.0
+
     # ---- Depth camera ------------------------------------------------------
     cam_fov_deg:       float = 90.0
     cam_width:         int   = 64
@@ -214,6 +218,30 @@ class Navigate:
             quantization_m = self.cam_quantization_m,
         )
     
+    def get_vis_depth(self, state: jnp.ndarray, width: int = 320, height: int = 240) -> jnp.ndarray:
+        """Render depth at arbitrary resolution for visualization (no pooling, no normalization)."""
+        arrays = self.scene_cfg.unpack(state[22:])
+        return apply_sensor_noise(
+            render_depth(
+                position         = state[0:3],
+                quaternion       = state[6:10],
+                fov_deg          = self.cam_fov_deg,
+                width            = width,
+                height           = height,
+                sphere_centers   = arrays["sphere_centers"],
+                sphere_radii     = arrays["sphere_radii"],
+                box_centers      = arrays["box_centers"],
+                box_half_extents = arrays["box_half_extents"],
+                capsule_centers  = arrays["capsule_centers"],
+                capsule_axes     = arrays["capsule_axes"],
+                capsule_hh       = arrays["capsule_hh"],
+                capsule_radii    = arrays["capsule_radii"],
+            ),
+            min_range      = self.cam_min_range,
+            max_range      = self.cam_max_range,
+            quantization_m = self.cam_quantization_m,
+        )
+
     def _get_processed_depth(self, state):
         raw   = self._get_depth(state)
         normd = 3.0 / jnp.clip(raw, 0.3, self.cam_max_range) - 0.6
@@ -229,11 +257,11 @@ class Navigate:
         arrays = self.scene_cfg.unpack(state[22:])
         dist   = jnp.inf
 
-        # Ground plane at z = -1 (normal pointing up)
+        # Ground plane at z = 0; normal = -z (pointing up in FRD/NED)
         dist = jnp.minimum(dist,
             point_plane_dist(pos,
-                jnp.array([0.0, 0.0, -1.0]),
-                jnp.array([0.0, 0.0,  1.0])))
+                jnp.array([0.0, 0.0,  0.0]),
+                jnp.array([0.0, 0.0, -1.0])))
 
         if arrays["sphere_centers"].shape[0] > 0:
             ds = jax.vmap(lambda c, r: point_sphere_dist(pos, c, r))(
@@ -289,12 +317,14 @@ class Navigate:
         dist = self._get_nearest_obstacle_dist(next_state)
         step_data = {
             "pos":        next_state[0:3],
+            "vel":        next_state[3:6],
+            "quat":       next_state[6:10],
             "target_pos": next_state[19:22],
             "omega":      next_state[10:13],
             "dist":       dist,
         }
         return next_state, step_data
-    
+
     def compute_loss(self, traj):
         """
         Trajectory loss from a full rollout.
@@ -304,24 +334,37 @@ class Navigate:
         Returns: (total_loss, mean_return) — mean_return = -total_loss
         """
         pos    = traj["pos"]        # (B, T, 3)
+        vel    = traj["vel"]        # (B, T, 3)
+        quat   = traj["quat"]       # (B, T, 4) — [w, x, y, z]
         target = traj["target_pos"] # (B, T, 3)
         omega  = traj["omega"]      # (B, T, 3)
         dist   = traj["dist"]       # (B, T)
 
-        diff   = pos - target
-        loss_xy = jnp.mean(jnp.sqrt(jnp.sum(diff[..., :2] ** 2, axis=-1) + 1e-8))
-        loss_z  = jnp.mean(jnp.abs(diff[..., 2]))
-        loss_rate = jnp.mean(jnp.sqrt(jnp.sum(omega ** 2, axis=-1) + 1e-8))
-        dist_diff = jnp.diff(dist, axis=1)                                          # (B, T-1)
+        diff = pos - target
+        loss_xy   = jnp.mean(jnp.sum(diff[..., :2] ** 2, axis=-1))
+        loss_z    = jnp.mean(diff[..., 2] ** 2)
+        loss_vel  = jnp.mean(jnp.sum(vel   ** 2, axis=-1))
+        loss_rate = jnp.mean(jnp.sum(omega ** 2, axis=-1))
+
+        # Pitch from quaternion: arctan2(2(wy - zx), sqrt(1 - (2(wy-zx))^2))
+        w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+        t2    = 2.0 * (w * y - z * x)
+        pitch = jnp.arctan2(t2, jnp.sqrt(jnp.maximum(1.0 - t2 ** 2, 1e-12)))
+        excess_pitch = jnp.maximum(jnp.abs(pitch) - self.perception_pitch_limit, 0.0)
+        loss_perception = jnp.mean(excess_pitch ** 2)
+
+        dist_diff = jnp.diff(dist, axis=1)                                           # (B, T-1)
         v_to_pt   = jax.lax.stop_gradient(jnp.clip(-dist_diff / self.dt, 1.0, None)) # (B, T-1)
         loss_collision = jnp.mean(
-            (self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:])))* v_to_pt
+            (self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:]))) * v_to_pt
         )
         loss_obj = jnp.mean(
             (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
-        total = loss_xy + loss_z + 0.001*loss_rate + 7.5*loss_collision + 3.0*loss_obj
+        total = (loss_xy + loss_z + 0.1*loss_vel + 0.01*loss_rate
+                 + 7.5*loss_collision + 3.0*loss_obj
+                 + self.perception_weight * loss_perception)
         return total, -total
 
 

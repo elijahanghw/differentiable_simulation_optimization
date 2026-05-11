@@ -12,16 +12,16 @@ env:
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
   init_x_max: 2.0
-  init_y_min: 0.0
-  init_y_max: 2.0
+  init_y_min: -1.0
+  init_y_max: 1.0
   init_z_min: -1.5
   init_z_max: -1.5
 
   # ---- Target spawn bounds -----------------------------------------------
   target_x_min: 8.0
   target_x_max: 10.0
-  target_y_min: -3.0
-  target_y_max: 3.0
+  target_y_min: -1.0
+  target_y_max: 1.0
   target_z_min: -1.5
   target_z_max: -1.5
 
@@ -31,8 +31,8 @@ env:
     # Arena bounds — obstacles are spawned inside this box
     arena_x_min: 2.0
     arena_x_max: 8.0
-    arena_y_min: 0.0
-    arena_y_max: 10.0
+    arena_y_min: -3.0
+    arena_y_max: 3.0
     arena_z_min: -3.0
     arena_z_max: 0.0
 
@@ -76,8 +76,8 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 10000
-  horizon: 200
+  epochs: 3000
+  horizon: 250
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-5
@@ -88,11 +88,11 @@ training:
 # Depth camera
 # -----------------------------------------------------------------------
 depth_camera:
-  fov_deg: 90.0         # degrees — horizontal field of view
+  fov_deg: 80.0         # degrees — horizontal field of view
   width: 64             # pixels  → 16 after 4×4 pool
   height: 48            # pixels  → 12 after 4×4 pool
   min_range: 0.3        # m  — closer than this → 0 (blind zone)
-  max_range: 8.0        # m  — farther / no-hit → max_range (saturated)
+  max_range: 24.0        # m  — farther / no-hit → max_range (saturated)
   quantization_m: 0.001 # m  — depth step size (1 mm, matches uint16 output)
 
 # -----------------------------------------------------------------------
