@@ -94,7 +94,7 @@ def log_scene(scene_cfg, scene_array):
     rr.log("world/ground", rr.Boxes3D(
         centers=[[5.0, 0.0, 0.0]],
         half_sizes=[[12.0, 12.0, 0.02]],
-        colors=[[130, 130, 130, 160]],
+        colors=[[130, 130, 130, 255]],
         fill_mode="solid",
     ), static=True)
 
@@ -146,7 +146,7 @@ def run_rollout(env, policy, policy_params, key, steps):
     hidden = policy.init_hidden()
 
     all_states = [jax.tree.map(np.array, state)]
-    raw_depths = [np.array(env._get_depth(state))]
+    raw_depths = [np.array(env.get_vis_depth(state))]
 
     for step_idx in range(steps):
         raw_act, hidden = policy.apply(
@@ -160,7 +160,7 @@ def run_rollout(env, policy, policy_params, key, steps):
         depth_img, obs_vec = env.get_obs(state)
 
         all_states.append(jax.tree.map(np.array, state))
-        raw_depths.append(np.array(env._get_depth(state)))
+        raw_depths.append(np.array(env.get_vis_depth(state)))
 
     return all_states, raw_depths
 

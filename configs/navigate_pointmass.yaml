@@ -5,17 +5,17 @@ env:
   name: pointmass_navigate
 
   # Camera (DiffPhysDrone single_agent defaults)
-  cam_angle_deg: 20.0    # upward tilt from forward axis (matches DiffPhysDrone sign convention)
+  cam_angle_deg: 10.0    # upward tilt from forward axis
   fov_x_deg: 79.5        # ≈ 2·atan(0.82), matches DiffPhysDrone fov_x_half_tan=0.82
 
   # Episode speed range (speed_mtp=1 → conservative; multiply for faster)
   max_speed_min: 0.75
-  max_speed_max: 2.5
+  max_speed_max: 2.00
 
-  # Gradient decay for training stability (0.4 = DiffPhysDrone default)
-  grad_decay: 0.4
+  # Gradient decay for training stability
+  grad_decay: 0.7
 
-  # Loss coefficients (DiffPhysDrone single_agent.args)
+  # Loss coefficients
   coef_v: 1.0
   coef_v_pred: 2.0
   coef_collide: 7.5
@@ -29,11 +29,11 @@ env:
     arena_x_max: 8.0
     arena_y_min: -3.0
     arena_y_max: 3.0
-    arena_z_min: 0.0
+    arena_z_min: 0.5
     arena_z_max: 4.0
-    n_spheres: 10
-    n_boxes: 10
-    n_capsules: 10
+    n_spheres: 15
+    n_boxes: 15
+    n_capsules: 15
     sphere_r_min: 0.10
     sphere_r_max: 0.40
     box_hx_min: 0.10

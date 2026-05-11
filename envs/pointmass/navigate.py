@@ -149,6 +149,9 @@ class PointMassNavigate:
     # --- Gradient decay -------------------------------------------------------
     grad_decay: float = 0.4
 
+    # --- Velocity loss rolling window (steps) --------------------------------
+    loss_v_window: int = 30
+
     # --- Loss coefficients (DiffPhysDrone single_agent.args) -----------------
     coef_v:             float = 1.0
     coef_v_pred:        float = 2.0
@@ -354,6 +357,31 @@ class PointMassNavigate:
         R_cam    = jnp.stack([cam_fwd, -cam_left, -cam_up], axis=1)
         return _rotmat_to_quat(R_cam)
 
+    def get_vis_depth(self, state, width=320, height=240):
+        """Render depth at an arbitrary resolution for visualization (no pooling, no noise)."""
+        arrays = self.scene_cfg.unpack(state["scene"])
+        quat   = self._get_camera_quat(state["R"])
+        return apply_sensor_noise(
+            render_depth(
+                position         = state["p"],
+                quaternion       = quat,
+                fov_deg          = self.fov_x_deg,
+                width            = width,
+                height           = height,
+                sphere_centers   = arrays["sphere_centers"],
+                sphere_radii     = arrays["sphere_radii"],
+                box_centers      = arrays["box_centers"],
+                box_half_extents = arrays["box_half_extents"],
+                capsule_centers  = arrays["capsule_centers"],
+                capsule_axes     = arrays["capsule_axes"],
+                capsule_hh       = arrays["capsule_hh"],
+                capsule_radii    = arrays["capsule_radii"],
+            ),
+            min_range      = self.cam_min_range,
+            max_range      = self.cam_max_range,
+            quantization_m = self.cam_quantization_m,
+        )
+
     def _get_processed_depth(self, state):
         raw   = self._get_depth(state)
         normd = 3.0 / jnp.clip(raw, 0.3, self.cam_max_range) - 0.6
@@ -440,11 +468,14 @@ class PointMassNavigate:
         v_pred       = traj["v_pred"]         # (B, T, 3)
         drone_radius = traj["drone_radius"]   # (B, T)
 
-        # -- Velocity tracking: smooth-L1 on mean trajectory velocity ---------
-        v_avg   = v.mean(axis=1)        # (B, 3)
-        tv_avg  = target_v.mean(axis=1) # (B, 3)
-        diff_v  = v_avg - tv_avg
-        loss_v  = jnp.mean(_smooth_l1(jnp.sqrt(jnp.sum(diff_v ** 2, axis=-1) + 1e-8)))
+        # -- Velocity tracking: smooth-L1 on rolling-window average -----------
+        # Matches DiffPhysDrone: v_roll[i] = mean(v[i:i+W]) vs target_v[i+1]
+        W       = self.loss_v_window
+        v_cum   = jnp.cumsum(v, axis=1)                        # (B, T, 3)
+        v_roll  = (v_cum[:, W:] - v_cum[:, :-W]) / W          # (B, T-W, 3)
+        tv_roll = target_v[:, 1:target_v.shape[1] - W + 1]    # (B, T-W, 3)
+        delta_v = jnp.sqrt(jnp.sum((v_roll - tv_roll) ** 2, axis=-1) + 1e-8)
+        loss_v  = jnp.mean(_smooth_l1(delta_v))
 
         # -- Velocity prediction: MSE against actual (stop-gradient) ----------
         loss_v_pred = jnp.mean((v_pred - jax.lax.stop_gradient(v)) ** 2)
