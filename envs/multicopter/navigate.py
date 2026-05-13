@@ -51,13 +51,14 @@ class Navigate:
     b2: float = 32.0
     motor_collision_radius: float = PROP_DIAMETER / 2  # ~0.038 m sphere per motor
 
-    # ---- Perception loss ----------------------------------------------
-    perception_pitch_limit: float = jnp.pi / 6   # ±30°
-    perception_weight:      float = 20.0
-
     # ---- Loss weights -------------------------------------------------
-    vel_weight:  float = 0.1
-    rate_weight: float = 0.01
+    xy_weight:         float = 1.0
+    z_weight:          float = 2.0
+    vel_weight:        float = 0.1
+    rate_weight:       float = 0.01
+    collision_weight:  float = 7.5
+    obj_weight:        float = 3.0
+    heading_weight:    float = 1.0
 
     # ---- Depth camera ------------------------------------------------------
     cam_fov_deg:       float = 90.0
@@ -358,12 +359,21 @@ class Navigate:
         loss_vel  = jnp.mean(jnp.sum(vel   ** 2, axis=-1))
         loss_rate = jnp.mean(jnp.sum(omega ** 2, axis=-1))
 
-        # Pitch from quaternion: arctan2(2(wy - zx), sqrt(1 - (2(wy-zx))^2))
+        # Heading alignment: body x-axis (forward) should point toward target
         w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
-        t2    = 2.0 * (w * y - z * x)
-        pitch = jnp.arctan2(t2, jnp.sqrt(jnp.maximum(1.0 - t2 ** 2, 1e-12)))
-        excess_pitch = jnp.maximum(jnp.abs(pitch) - self.perception_pitch_limit, 0.0)
-        loss_perception = jnp.mean(excess_pitch ** 2)
+        fwd = jnp.stack([
+            1.0 - 2.0 * (y**2 + z**2),
+            2.0 * (x*y + z*w),
+            2.0 * (x*z - y*w),
+        ], axis=-1)  # (B, T, 3) — body x-axis in world frame
+
+        to_target = target - pos
+        to_target = to_target / jnp.sqrt(
+            jnp.maximum(jnp.sum(to_target**2, axis=-1, keepdims=True), 1e-8)
+        )
+
+        cos_sim = jnp.sum(fwd * to_target, axis=-1)  # (B, T)
+        loss_heading = jnp.mean((1.0 - cos_sim) ** 2)
 
         dist_diff = jnp.diff(dist, axis=1)                                           # (B, T-1)
         v_to_pt   = jax.lax.stop_gradient(jnp.clip(-dist_diff / self.dt, 1.0, None)) # (B, T-1)
@@ -374,9 +384,10 @@ class Navigate:
             (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
-        total = (loss_xy + 2*loss_z + self.vel_weight*loss_vel + self.rate_weight*loss_rate
-                 + 7.5*loss_collision + 3.0*loss_obj
-                 + self.perception_weight * loss_perception)
+        total = (self.xy_weight*loss_xy + self.z_weight*loss_z
+                 + self.vel_weight*loss_vel + self.rate_weight*loss_rate
+                 + self.collision_weight*loss_collision + self.obj_weight*loss_obj
+                 + self.heading_weight*loss_heading)
         return total, -total
 
 
