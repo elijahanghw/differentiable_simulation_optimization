@@ -15,8 +15,8 @@ import jax.numpy as jnp
 # HEIGHT = 0.1
 
 # 3 inch drone
-BODY_MASS = 0.150
-MOTOR_MASS = 0.010
+BODY_MASS = 0.300
+MOTOR_MASS = 0.015
 ARM_DENSITY = 0.034 # kg/m
 MAX_RPM = 3200 # rad/s
 
@@ -136,7 +136,7 @@ def morphology(l, phi=None, alpha=None):
     
     Bm = Bm * MAX_RPM * MAX_RPM
 
-    return Bf, Bm, m, J, J_inv
+    return Bf, Bm, m, J, J_inv, propeller_positions
 
 def _seg_to_seg_dist(p0, p1, q0, q1, eps=1e-8):
     """Minimum distance between two line segments P(s) and Q(t), s,t ∈ [0,1]."""

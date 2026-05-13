@@ -99,7 +99,7 @@ def log_scene(scene_cfg, scene_array):
     rr.log("world/ground", rr.Boxes3D(
         centers=[[cx, cy, 0.02]],
         half_sizes=[[hx, hy, 0.02]],
-        colors=[[130, 130, 130, 160]],
+        colors=[[130, 130, 130, 255]],
         fill_mode="solid",
     ), static=True)
 
@@ -219,6 +219,14 @@ def visualise(env, all_states, raw_depths, l, phi, alpha, dt):
         for i in range(6)
     ])  # (6, n_pts, 3)
 
+    fov_d = 0.2; fov_h = 0.1
+    fov_corners_body = np.array([        # camera looks in +x (FRD forward)
+        [fov_d, -fov_h, -fov_h],
+        [fov_d,  fov_h, -fov_h],
+        [fov_d,  fov_h,  fov_h],
+        [fov_d, -fov_h,  fov_h],
+    ])
+
     for t, (state, raw_depth) in enumerate(zip(all_states, raw_depths)):
         rr.set_time("time", duration=t * dt)
 
@@ -242,6 +250,13 @@ def visualise(env, all_states, raw_depths, l, phi, alpha, dt):
         ]
         rr.log("drone/discs", rr.LineStrips3D(disc_strips, colors=[[80, 220, 80]], radii=0.003))
 
+        corners_w = pos + (R @ fov_corners_body.T).T  # (4, 3)
+        rr.log("drone/fov", rr.LineStrips3D([
+            np.stack([corners_w[0], pos, corners_w[1]]),          # tl–apex–tr
+            np.stack([corners_w[2], pos, corners_w[3]]),          # br–apex–bl
+            corners_w[[0, 1, 2, 3, 0]],                           # rectangle
+        ], colors=[[255, 200, 50, 160]], radii=0.005))
+
         rr.log("drone/depth_image", rr.Image(_norm_depth(raw_depth)))
 
         roll, pitch, yaw = quat_to_euler(state[6:10])
@@ -257,7 +272,8 @@ def visualise(env, all_states, raw_depths, l, phi, alpha, dt):
         rr.log("state/wx",             rr.Scalars(float(state[10])))
         rr.log("state/wy",             rr.Scalars(float(state[11])))
         rr.log("state/wz",             rr.Scalars(float(state[12])))
-        rr.log("state/dist_to_target", rr.Scalars(float(np.linalg.norm(pos - state[19:22]))))
+        rr.log("state/dist_to_target",        rr.Scalars(float(np.linalg.norm(pos - state[19:22]))))
+        rr.log("state/nearest_obstacle_dist", rr.Scalars(float(env._get_nearest_obstacle_dist(state, jnp.array(prop_world)))))
 
     rr.set_time("time", duration=len(all_states) * dt)
     traj = np.array([s[0:3] for s in all_states])

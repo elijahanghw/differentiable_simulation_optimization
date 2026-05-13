@@ -4,8 +4,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "depth_re
 import jax
 import jax.numpy as jnp
 from .dynamics import forward_euler, semi_implicit_euler, rk4, _gdecay
-from .morphology import morphology
-from .quat_math import euler_to_quat, quat_to_euler
+from .morphology import morphology, PROP_DIAMETER
+from .quat_math import euler_to_quat, quat_to_euler, quat_to_rotmat
 from .scene import SceneConfig
 
 from renderer import render_depth, apply_sensor_noise  # depth_render/renderer.py
@@ -49,10 +49,15 @@ class Navigate:
     # ---- Collision loss -----------------------------------------------
     b1: float = 1.0
     b2: float = 32.0
+    motor_collision_radius: float = PROP_DIAMETER / 2  # ~0.038 m sphere per motor
 
     # ---- Perception loss ----------------------------------------------
     perception_pitch_limit: float = jnp.pi / 6   # ±30°
-    perception_weight:      float = 5.0
+    perception_weight:      float = 20.0
+
+    # ---- Loss weights -------------------------------------------------
+    vel_weight:  float = 0.1
+    rate_weight: float = 0.01
 
     # ---- Depth camera ------------------------------------------------------
     cam_fov_deg:       float = 90.0
@@ -251,33 +256,37 @@ class Navigate:
             window_dimensions=(4, 4), window_strides=(4, 4), padding="VALID",
         )
     
-    def _get_nearest_obstacle_dist(self, state):
-        """Signed distance to the nearest obstacle surface (negative = inside)."""
+    def _get_nearest_obstacle_dist(self, state, motor_positions_world=None):
+        """Signed distance to the nearest obstacle surface (negative = inside).
+
+        If motor_positions_world (6, 3) is provided, the effective distance is
+        min(body_center_dist, min_i(motor_dist_i - motor_collision_radius)).
+        """
         pos    = state[0:3]
         arrays = self.scene_cfg.unpack(state[22:])
-        dist   = jnp.inf
 
-        # Ground plane at z = 0; normal = -z (pointing up in FRD/NED)
-        dist = jnp.minimum(dist,
-            point_plane_dist(pos,
-                jnp.array([0.0, 0.0,  0.0]),
-                jnp.array([0.0, 0.0, -1.0])))
+        def _point_dist(pt):
+            d = point_plane_dist(pt, jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, -1.0]))
+            if arrays["sphere_centers"].shape[0] > 0:
+                ds = jax.vmap(lambda c, r: point_sphere_dist(pt, c, r))(
+                    arrays["sphere_centers"], arrays["sphere_radii"])
+                d = jnp.minimum(d, jnp.min(ds))
+            if arrays["box_centers"].shape[0] > 0:
+                ds = jax.vmap(lambda c, he: point_aabb_dist(pt, c, he))(
+                    arrays["box_centers"], arrays["box_half_extents"])
+                d = jnp.minimum(d, jnp.min(ds))
+            if arrays["capsule_centers"].shape[0] > 0:
+                ds = jax.vmap(lambda c, ax, hh, r: point_capsule_dist(pt, c, ax, hh, r))(
+                    arrays["capsule_centers"], arrays["capsule_axes"],
+                    arrays["capsule_hh"], arrays["capsule_radii"])
+                d = jnp.minimum(d, jnp.min(ds))
+            return d
 
-        if arrays["sphere_centers"].shape[0] > 0:
-            ds = jax.vmap(lambda c, r: point_sphere_dist(pos, c, r))(
-                arrays["sphere_centers"], arrays["sphere_radii"])
-            dist = jnp.minimum(dist, jnp.min(ds))
+        dist = _point_dist(pos)
 
-        if arrays["box_centers"].shape[0] > 0:
-            ds = jax.vmap(lambda c, he: point_aabb_dist(pos, c, he))(
-                arrays["box_centers"], arrays["box_half_extents"])
-            dist = jnp.minimum(dist, jnp.min(ds))
-
-        if arrays["capsule_centers"].shape[0] > 0:
-            ds = jax.vmap(lambda c, ax, hh, r: point_capsule_dist(pos, c, ax, hh, r))(
-                arrays["capsule_centers"], arrays["capsule_axes"],
-                arrays["capsule_hh"], arrays["capsule_radii"])
-            dist = jnp.minimum(dist, jnp.min(ds))
+        if motor_positions_world is not None:
+            motor_dists = jax.vmap(_point_dist)(motor_positions_world) - self.motor_collision_radius
+            dist = jnp.minimum(dist, jnp.min(motor_dists))
 
         return dist
 
@@ -299,7 +308,7 @@ class Navigate:
                 if self.alternating_alpha else jnp.full(3, self.alpha_default)
             )
 
-        Bf, Bm, m, J, J_inv = morphology(l, phi, alpha)
+        Bf, Bm, m, J, J_inv, motor_pos_body = morphology(l, phi, alpha)
         U = jnp.clip(action, -1.0, 1.0)
 
         integrators = {"euler": forward_euler, "semi_implicit_euler": semi_implicit_euler, "rk4": rk4}
@@ -314,7 +323,10 @@ class Navigate:
         # Target + scene are frozen; append unchanged
         next_state = jnp.concatenate([next_drone, state[19:]])
 
-        dist = self._get_nearest_obstacle_dist(next_state)
+        R_sg            = jax.lax.stop_gradient(quat_to_rotmat(next_drone[6:10]))
+        motor_pos_world = next_drone[0:3] + motor_pos_body @ R_sg.T  # (6, 3) world frame
+
+        dist = self._get_nearest_obstacle_dist(next_state, motor_pos_world)
         step_data = {
             "pos":        next_state[0:3],
             "vel":        next_state[3:6],
@@ -362,7 +374,7 @@ class Navigate:
             (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
-        total = (loss_xy + loss_z + 0.1*loss_vel + 0.01*loss_rate
+        total = (loss_xy + 2*loss_z + self.vel_weight*loss_vel + self.rate_weight*loss_rate
                  + 7.5*loss_collision + 3.0*loss_obj
                  + self.perception_weight * loss_perception)
         return total, -total

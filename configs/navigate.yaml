@@ -11,17 +11,17 @@ env:
 
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
-  init_x_max: 2.0
-  init_y_min: -1.0
-  init_y_max: 1.0
+  init_x_max: 1.0
+  init_y_min: -3.0
+  init_y_max: 3.0
   init_z_min: -1.5
   init_z_max: -1.5
 
   # ---- Target spawn bounds -----------------------------------------------
-  target_x_min: 8.0
+  target_x_min: 9.0
   target_x_max: 10.0
-  target_y_min: -1.0
-  target_y_max: 1.0
+  target_y_min: -3.0
+  target_y_max: 3.0
   target_z_min: -1.5
   target_z_max: -1.5
 
@@ -31,10 +31,10 @@ env:
     # Arena bounds — obstacles are spawned inside this box
     arena_x_min: 2.0
     arena_x_max: 8.0
-    arena_y_min: -3.0
-    arena_y_max: 3.0
-    arena_z_min: -3.0
-    arena_z_max: 0.0
+    arena_y_min: -5.0
+    arena_y_max: 5.0
+    arena_z_min: -4.0
+    arena_z_max: -0.5
 
     # Obstacle counts
     n_spheres:  10
@@ -99,5 +99,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_logs.csv
-  checkpoint_path: checkpoints/navigate.pkl
+  csv_path: logs/navigate_propcollision_logs.csv
+  checkpoint_path: checkpoints/navigate_propcollision.pkl

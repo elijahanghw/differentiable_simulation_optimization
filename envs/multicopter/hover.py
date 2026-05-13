@@ -128,7 +128,7 @@ class Hover3d:
             else:
                 alpha = jnp.full(3, self.alpha_default)
 
-        Bf, Bm, m, J, J_inv = morphology(l, phi, alpha)
+        Bf, Bm, m, J, J_inv, _ = morphology(l, phi, alpha)
 
         U = jnp.clip(action, -1.0, 1.0)  # command ∈ [-1, 1], matching W state range
 
