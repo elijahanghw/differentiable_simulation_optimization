@@ -158,9 +158,14 @@ def _disc_points(normal, radius, n_pts=32):
     return radius * (np.cos(angles)[:, None] * u + np.sin(angles)[:, None] * v)
 
 
-def _norm_depth(raw):
-    d_min, d_max = raw.min(), raw.max()
-    return ((raw - d_min) / (d_max - d_min + 1e-8)).astype(np.float32)
+def _norm_depth(raw, d_max=24.0):
+    return np.clip(raw / d_max, 0.0, 1.0).astype(np.float32)
+
+
+def _norm_proc_depth(proc, cam_max_range):
+    d_min = 3.0 / cam_max_range - 0.6   # value at no-hit (sky)
+    d_max = 9.4                           # value at closest clip (0.3 m)
+    return np.clip((proc - d_min) / (d_max - d_min), 0.0, 1.0).astype(np.float32)
 
 
 def run_rollout(env, policy, policy_params, key, steps):
@@ -169,8 +174,9 @@ def run_rollout(env, policy, policy_params, key, steps):
 
     hidden = policy.init_hidden()
 
-    all_states = [np.array(state)]
-    raw_depths = [np.array(env.get_vis_depth(state))]
+    all_states  = [np.array(state)]
+    raw_depths  = [np.array(env.get_vis_depth(state))]
+    proc_depths = [np.array(env._get_processed_depth(state))]
 
     for _ in range(steps):
         action, hidden = policy.apply(
@@ -181,11 +187,12 @@ def run_rollout(env, policy, policy_params, key, steps):
 
         all_states.append(np.array(state))
         raw_depths.append(np.array(env.get_vis_depth(state)))
+        proc_depths.append(np.array(env._get_processed_depth(state)))
 
-    return all_states, raw_depths
+    return all_states, raw_depths, proc_depths
 
 
-def visualise(env, all_states, raw_depths, l, phi, alpha, dt):
+def visualise(env, all_states, raw_depths, proc_depths, l, phi, alpha, dt):
     log_scene(env.scene_cfg, all_states[0][22:])
 
     rr.log("world/target", rr.Points3D(
@@ -227,7 +234,7 @@ def visualise(env, all_states, raw_depths, l, phi, alpha, dt):
         [fov_d, -fov_h,  fov_h],
     ])
 
-    for t, (state, raw_depth) in enumerate(zip(all_states, raw_depths)):
+    for t, (state, raw_depth, proc_depth) in enumerate(zip(all_states, raw_depths, proc_depths)):
         rr.set_time("time", duration=t * dt)
 
         pos  = state[0:3]
@@ -257,7 +264,8 @@ def visualise(env, all_states, raw_depths, l, phi, alpha, dt):
             corners_w[[0, 1, 2, 3, 0]],                           # rectangle
         ], colors=[[255, 200, 50, 160]], radii=0.005))
 
-        rr.log("drone/depth_image", rr.Image(_norm_depth(raw_depth)))
+        rr.log("drone/depth_image",      rr.Image(_norm_depth(raw_depth, env.cam_max_range)))
+        rr.log("drone/proc_depth_image", rr.Image(_norm_proc_depth(proc_depth, env.cam_max_range)))
 
         roll, pitch, yaw = quat_to_euler(state[6:10])
         rr.log("state/x",              rr.Scalars(float(pos[0])))
@@ -314,14 +322,14 @@ def main():
 
     key = jax.random.PRNGKey(args.seed)
     print("Running rollout …")
-    all_states, raw_depths = run_rollout(env, policy, policy_params, key, args.steps)
+    all_states, raw_depths, proc_depths = run_rollout(env, policy, policy_params, key, args.steps)
     print(f"  {len(all_states)} states collected")
 
     rr.init("navigate_rollout")
     rr.log("/", rr.ViewCoordinates.FRD, static=True)  # x-forward, y-right, z-down
 
     print("Logging to Rerun …")
-    visualise(env, all_states, raw_depths, l, phi, alpha, env.dt)
+    visualise(env, all_states, raw_depths, proc_depths, l, phi, alpha, env.dt)
 
     rr.save(args.output)
     print(f"Saved → {args.output}")

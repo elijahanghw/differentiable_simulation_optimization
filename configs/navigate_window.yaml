@@ -13,26 +13,26 @@ env:
   xy_weight:        1.0
   z_weight:         2.0
   vel_weight:       0.2
-  rate_weight:      0.05
+  rate_weight:      0.1
   collision_weight: 7.5
   obj_weight:       1.0
-  heading_weight:   30.0
+  heading_weight:   10.0
   b1: 1.0
   b2: 32.0
 
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
   init_x_max: 1.0
-  init_y_min: -3.0
-  init_y_max: 3.0
+  init_y_min: -1.0
+  init_y_max: 1.0
   init_z_min: -1.5
   init_z_max: -1.5
 
   # ---- Target spawn bounds -----------------------------------------------
   target_x_min: 9.0
   target_x_max: 10.0
-  target_y_min: -3.0
-  target_y_max: 3.0
+  target_y_min: -0.0
+  target_y_max: 0.0
   target_z_min: -1.5
   target_z_max: -1.5
 
@@ -48,10 +48,10 @@ env:
     arena_z_max: -0.5
 
     # Obstacle counts
-    n_spheres:  10
-    n_boxes:    10
-    n_capsules: 10
-    n_windows: 0
+    n_spheres:  0
+    n_boxes:    0
+    n_capsules: 0
+    n_windows:  1
 
     # Sphere size
     sphere_r_min: 0.15
@@ -77,10 +77,10 @@ env:
     # window_border: solid wall on each side of the opening (y and z)
     # window_depth: wall thickness in x
     window_positions: [[5.0, 0.0, -1.5]]
-    window_w: 1.0
-    window_h: 1.0
+    window_w: 1.5
+    window_h: 1.5
     window_border: 3
-    window_depth: 0.2
+    window_depth: 0.5
 
 # -----------------------------------------------------------------------
 # Policy
@@ -99,7 +99,7 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 3000
+  epochs: 4000
   horizon: 250
   batch_size: 64
   lr: 1.0e-3
@@ -122,5 +122,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_propcollision2_logs.csv
-  checkpoint_path: checkpoints/navigate_propcollision2.pkl
+  csv_path: logs/navigate_window_small_logs.csv
+  checkpoint_path: checkpoints/navigate_window_small.pkl
