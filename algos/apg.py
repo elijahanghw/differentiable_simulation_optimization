@@ -16,6 +16,7 @@ For each epoch:
   5. Backpropagate with jax.value_and_grad and update with Adam.
 """
 
+import time
 from typing import Any, Dict
 
 import jax
@@ -168,6 +169,48 @@ def _build_loss_fn_multicopter_traj(env, policy, horizon: int):
     return loss_fn
 
 
+def _build_loss_fn_multicopter_traj_morph(env, policy, horizon: int):
+    """Like _build_loss_fn_multicopter_traj but jointly optimises morph_params."""
+    has_hidden = hasattr(policy, "init_hidden")
+    has_depth  = hasattr(policy, "conv_features")
+
+    def single_rollout(policy_params, morph_params, init_state):
+        init_obs = env._get_obs(init_state)
+
+        if has_hidden:
+            def step(carry, _):
+                state, obs, hidden = carry
+                if has_depth:
+                    depth_img, obs_vec = obs
+                    action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+                else:
+                    action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
+                new_state, step_data = env.step(state, action, morph_params)
+                new_obs = env._get_obs(new_state)
+                return (new_state, new_obs, new_hidden), step_data
+            init_carry = (init_state, init_obs, policy.init_hidden())
+        else:
+            def step(carry, _):
+                state, obs = carry
+                action = policy.apply({"params": policy_params}, obs)
+                new_state, step_data = env.step(state, action, morph_params)
+                new_obs = env._get_obs(new_state)
+                return (new_state, new_obs), step_data
+            init_carry = (init_state, init_obs)
+
+        _, traj = jax.lax.scan(step, init_carry, None, length=horizon)
+        return traj
+
+    batch_rollout = jax.vmap(single_rollout, in_axes=(None, None, 0))
+
+    def loss_fn(policy_params, morph_params, init_states):
+        traj = batch_rollout(policy_params, morph_params, init_states)
+        total_loss, mean_return = env.compute_loss(traj)
+        return total_loss, mean_return
+
+    return loss_fn
+
+
 def _build_loss_fn_morph(env, policy, horizon: int):
     has_hidden = hasattr(policy, "init_hidden")
     has_depth  = hasattr(policy, "conv_features")
@@ -238,6 +281,7 @@ def train(config: Dict[str, Any]) -> Any:
     # exposes compute_loss + private _get_obs only.
     has_diffdrone  = hasattr(env, "compute_loss") and hasattr(env, "get_obs")
     has_traj_loss  = hasattr(env, "compute_loss") and not hasattr(env, "get_obs")
+    has_traj_morph = has_traj_loss and has_morph
 
     # -- Policy -------------------------------------------------------------
     pcfg   = config["policy"]
@@ -262,6 +306,32 @@ def train(config: Dict[str, Any]) -> Any:
     if has_diffdrone:
         loss_fn = _build_loss_fn_pointmass(env, policy, horizon)
         grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+    elif has_traj_morph:
+        morph_params    = env.init_morph()
+        morph_schedule  = optax.cosine_decay_schedule(init_value=morph_lr, decay_steps=morph_epochs, alpha=morph_lr_min / morph_lr)
+        morph_optimizer = optax.chain(
+            optax.clip_by_global_norm(grad_clip),
+            optax.adam(morph_schedule, b1=0.5, b2=0.99),
+        )
+        morph_opt_state = morph_optimizer.init(morph_params)
+        loss_fn = _build_loss_fn_multicopter_traj_morph(env, policy, horizon)
+        grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
+
+        has_morphological_loss = (
+            use_morph_loss
+            and hasattr(env, "get_l")
+            and hasattr(env, "get_phi")
+            and hasattr(env, "get_alpha")
+        )
+        if has_morphological_loss:
+            def _morphological_loss_fn(morph_params):
+                return propeller_collision_loss_from_params(
+                    env.get_l(morph_params),
+                    env.get_phi(morph_params),
+                    env.get_alpha(morph_params),
+                    weight=morph_loss_weight,
+                )
+            morphological_grad_fn = jax.jit(jax.value_and_grad(_morphological_loss_fn))
     elif has_traj_loss:
         loss_fn = _build_loss_fn_multicopter_traj(env, policy, horizon)
         grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
@@ -318,6 +388,9 @@ def train(config: Dict[str, Any]) -> Any:
     if has_diffdrone:
         print(f"Mode         : DiffPhysDrone loss (velocity-tracking + collision barriers)")
         print(f"Optim        : Adam lr={lr}→{lr_min}  grad_clip={grad_clip}  grad_decay={getattr(env, 'grad_decay', 0.4)}")
+    elif has_traj_morph:
+        print(f"Mode         : Trajectory loss + morphology")
+        print(f"Optim        : Adam lr={lr}→{lr_min}  morph_lr={morph_lr}  morph_epochs={morph_epochs}  grad_clip={grad_clip}")
     elif has_traj_loss:
         print(f"Mode         : Trajectory loss (position + rate + collision barriers)")
         print(f"Optim        : Adam lr={lr}→{lr_min}  grad_clip={grad_clip}")
@@ -329,6 +402,7 @@ def train(config: Dict[str, Any]) -> Any:
 
     # -- Main loop ----------------------------------------------------------
     reset_fn = jax.jit(jax.vmap(env.reset))
+    t_start = time.time()
 
     for epoch in range(epochs):
         key, state_key, noise_key = jax.random.split(key, 3)
@@ -349,6 +423,42 @@ def train(config: Dict[str, Any]) -> Any:
                     "loss":        float(loss),
                     "grad_norm":   float(grad_norm),
                 })
+                print(f"  elapsed: {time.time() - t_start:.1f}s")
+        elif has_traj_morph:
+            (loss, mean_return), (policy_grads, morph_grads) = grad_fn(
+                policy_params, morph_params, init_states
+            )
+            policy_grad_norm = optax.global_norm(policy_grads)
+
+            policy_updates, policy_opt_state = policy_optimizer.update(policy_grads, policy_opt_state)
+            policy_params = optax.apply_updates(policy_params, policy_updates)
+
+            morphological_loss = 0.0
+            if epoch < morph_epochs:
+                rollout_morph_grads = morph_grads
+                if has_morphological_loss:
+                    morphological_loss, morphological_grads = morphological_grad_fn(morph_params)
+                    rollout_morph_grads = jax.tree.map(
+                        lambda a, b: a + b, rollout_morph_grads, morphological_grads
+                    )
+                morph_updates, morph_opt_state = morph_optimizer.update(
+                    rollout_morph_grads, morph_opt_state
+                )
+                morph_params = optax.apply_updates(morph_params, morph_updates)
+
+            if epoch % log_every == 0:
+                log_data = {
+                    "epoch":       epoch,
+                    "mean_return": float(mean_return),
+                    "loss":        float(loss),
+                    "grad_norm":   float(policy_grad_norm),
+                }
+                if has_morphological_loss:
+                    log_data["morphological_loss"] = float(morphological_loss)
+                if has_morph_info:
+                    log_data.update(env.get_morph_info(morph_params))
+                logger.log(log_data)
+                print(f"  elapsed: {time.time() - t_start:.1f}s")
         elif has_traj_loss:
             (loss, mean_return), grads = grad_fn(policy_params, init_states)
             grad_norm = optax.global_norm(grads)
@@ -363,6 +473,7 @@ def train(config: Dict[str, Any]) -> Any:
                     "loss":        float(loss),
                     "grad_norm":   float(grad_norm),
                 })
+                print(f"  elapsed: {time.time() - t_start:.1f}s")
         elif has_morph:
             (loss, mean_return), (policy_grads, morph_grads) = grad_fn(
                 policy_params, morph_params, init_states, init_obs
@@ -399,6 +510,7 @@ def train(config: Dict[str, Any]) -> Any:
                 if has_morph_info:
                     log_data.update(env.get_morph_info(morph_params))
                 logger.log(log_data)
+                print(f"  elapsed: {time.time() - t_start:.1f}s")
         else:
             (loss, mean_return), grads = grad_fn(policy_params, init_states, init_obs)
             grad_norm = optax.global_norm(grads)
@@ -413,6 +525,7 @@ def train(config: Dict[str, Any]) -> Any:
                     "loss":        float(loss),
                     "grad_norm":   float(grad_norm),
                 })
+                print(f"  elapsed: {time.time() - t_start:.1f}s")
 
     save_checkpoint(ckpt_path, policy_params, morph_params if (has_morph and not has_diffdrone) else None)
 

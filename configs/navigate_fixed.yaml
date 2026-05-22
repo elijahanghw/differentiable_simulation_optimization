@@ -13,7 +13,7 @@ env:
   xy_weight:        1.0
   z_weight:         2.0
   vel_weight:       0.2
-  rate_weight:      0.05
+  rate_weight:      0.1
   collision_weight: 7.5
   obj_weight:       1.0
   heading_weight:   30.0
@@ -99,7 +99,7 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 3000
+  epochs: 5000
   horizon: 250
   batch_size: 64
   lr: 1.0e-3
@@ -122,5 +122,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_propcollision2_logs.csv
-  checkpoint_path: checkpoints/navigate_propcollision2.pkl
+  csv_path: logs/navigate_fixed_logs.csv
+  checkpoint_path: checkpoints/navigate_fixed.pkl

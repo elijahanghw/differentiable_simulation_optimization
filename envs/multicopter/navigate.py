@@ -72,8 +72,8 @@ class Navigate:
     # ---- Morphology --------------------------------------------------------
     l_min: float = 0.10;  l_max: float = 0.20;  l_default: float = 0.15
     phi_min:   float = -jnp.pi / 6; phi_max:   float =  jnp.pi / 6; phi_default:   float = 0.0
-    alpha_min: float = -jnp.pi / 4; alpha_max: float =  jnp.pi / 4; alpha_default: float = 0.0
-    alternating_alpha: bool = True
+    alpha_min: float = -jnp.pi / 2; alpha_max: float =  jnp.pi / 2; alpha_default: float = 0.0
+    alternating_alpha: bool = False
     train_morphology:  bool = False
     integrator: str = "rk4"
 
@@ -298,16 +298,16 @@ class Navigate:
     def step(self, state: jnp.ndarray, action: jnp.ndarray, morph_params: dict = None) -> tuple:
         # ---- Morphology ----------------------------------------------------
         if self.train_morphology and morph_params is not None:
-            l     = self.l_min     + (self.l_max     - self.l_min)     * jax.nn.sigmoid(morph_params["l_raw"])
-            phi   = self.phi_min   + (self.phi_max   - self.phi_min)   * jax.nn.sigmoid(morph_params["phi_raw"])
-            alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * jax.nn.sigmoid(morph_params["alpha_raw"])
+            l     = self.l_min     + (self.l_max     - self.l_min)     * jax.nn.sigmoid(morph_params["l_raw"])     # (3,)
+            phi   = self.phi_min   + (self.phi_max   - self.phi_min)   * jax.nn.sigmoid(morph_params["phi_raw"])   # (3,)
+            alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * jax.nn.sigmoid(morph_params["alpha_raw"]) # (3,)
         else:
             l   = jnp.full(3, self.l_default)
             phi = jnp.full(3, self.phi_default)
-            alpha = (
-                jnp.array([self.alpha_default, -self.alpha_default, self.alpha_default])
-                if self.alternating_alpha else jnp.full(3, self.alpha_default)
-            )
+            if self.alternating_alpha:
+                alpha = jnp.array([self.alpha_default, -self.alpha_default, self.alpha_default])
+            else:
+                alpha = jnp.full(3, self.alpha_default)
 
         Bf, Bm, m, J, J_inv, motor_pos_body = morphology(l, phi, alpha)
         U = jnp.clip(action, -1.0, 1.0)
@@ -397,25 +397,38 @@ class Navigate:
     # -----------------------------------------------------------------------
 
     def _alpha_to_raw(self, alpha_val: float) -> float:
+        """Inverse sigmoid: map alpha value to raw logit parameter."""
         normalized = (alpha_val - self.alpha_min) / (self.alpha_max - self.alpha_min)
         normalized = jnp.clip(normalized, 1e-6, 1.0 - 1e-6)
         return jnp.log(normalized / (1.0 - normalized))
 
     def init_morph(self) -> dict:
-        alpha_raw = (
-            jnp.array([self._alpha_to_raw(self.alpha_default),
-                        self._alpha_to_raw(-self.alpha_default),
-                        self._alpha_to_raw(self.alpha_default)])
-            if self.alternating_alpha else jnp.zeros(3)
-        )
+        # raw = 0 → sigmoid(0) = 0.5 → midpoint of bounds for all params
+        if self.alternating_alpha:
+            alpha_raw = jnp.array([
+                self._alpha_to_raw( self.alpha_default),
+                self._alpha_to_raw(-self.alpha_default),
+                self._alpha_to_raw( self.alpha_default),
+            ])
+        else:
+            alpha_raw = jnp.zeros(3)
         return {"l_raw": jnp.zeros(3), "phi_raw": jnp.zeros(3), "alpha_raw": alpha_raw}
 
-    def get_l(self, mp):     return self.l_min     + (self.l_max     - self.l_min)     * jax.nn.sigmoid(mp["l_raw"])
-    def get_phi(self, mp):   return self.phi_min   + (self.phi_max   - self.phi_min)   * jax.nn.sigmoid(mp["phi_raw"])
-    def get_alpha(self, mp): return self.alpha_min + (self.alpha_max - self.alpha_min) * jax.nn.sigmoid(mp["alpha_raw"])
+    def get_l(self, morph_params: dict) -> jnp.ndarray:
+        return self.l_min + (self.l_max - self.l_min) * jax.nn.sigmoid(morph_params["l_raw"])
 
-    def get_morph_info(self, mp) -> dict:
-        l, phi, alpha = self.get_l(mp), self.get_phi(mp), self.get_alpha(mp)
-        return {f"l{i+1}": float(l[i]) for i in range(3)} \
-             | {f"phi{i+1}": float(phi[i]) for i in range(3)} \
-             | {f"alpha{i+1}": float(alpha[i]) for i in range(3)}
+    def get_phi(self, morph_params: dict) -> jnp.ndarray:
+        return self.phi_min + (self.phi_max - self.phi_min) * jax.nn.sigmoid(morph_params["phi_raw"])
+
+    def get_alpha(self, morph_params: dict) -> jnp.ndarray:
+        return self.alpha_min + (self.alpha_max - self.alpha_min) * jax.nn.sigmoid(morph_params["alpha_raw"])
+
+    def get_morph_info(self, morph_params: dict) -> dict:
+        l     = self.get_l(morph_params)
+        phi   = self.get_phi(morph_params)
+        alpha = self.get_alpha(morph_params)
+        return {
+            "l1": float(l[0]),       "l2": float(l[1]),       "l3": float(l[2]),
+            "phi1": float(phi[0]),   "phi2": float(phi[1]),   "phi3": float(phi[2]),
+            "alpha1": float(alpha[0]), "alpha2": float(alpha[1]), "alpha3": float(alpha[2]),
+        }

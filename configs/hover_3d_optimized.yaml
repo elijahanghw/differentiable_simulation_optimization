@@ -38,12 +38,12 @@ training:
   morph_lr: 5.0e-3
   morph_lr_min: 1.0e-3
   grad_clip: 1.0     # global gradient norm clip
-  gamma: 0.99        # discount factor
+  # gamma: 0.99        # discount factor
   log_interval: 10   # print/log every N epochs
 
 # -----------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/gru_morph_optimal_hover_3d_logs.csv
-  checkpoint_path: checkpoints/gru_morph_optimal_hover_3d.pkl
+  csv_path: logs/gru_morph_optimal_hover_3d_logs_test.csv
+  checkpoint_path: checkpoints/gru_morph_optimal_hover_3d_test.pkl
