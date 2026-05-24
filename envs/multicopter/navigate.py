@@ -75,6 +75,7 @@ class Navigate:
     alpha_min: float = -jnp.pi / 2; alpha_max: float =  jnp.pi / 2; alpha_default: float = 0.0
     alternating_alpha: bool = False
     train_morphology:  bool = False
+    morph_init_scale:  float = 0.0  # std of Normal noise added to raw pre-sigmoid values; 0 = deterministic
     integrator: str = "rk4"
 
     # ---- Drone initial state bounds -----------------------------------------
@@ -402,8 +403,7 @@ class Navigate:
         normalized = jnp.clip(normalized, 1e-6, 1.0 - 1e-6)
         return jnp.log(normalized / (1.0 - normalized))
 
-    def init_morph(self) -> dict:
-        # raw = 0 → sigmoid(0) = 0.5 → midpoint of bounds for all params
+    def init_morph(self, key=None) -> dict:
         if self.alternating_alpha:
             alpha_raw = jnp.array([
                 self._alpha_to_raw( self.alpha_default),
@@ -412,7 +412,15 @@ class Navigate:
             ])
         else:
             alpha_raw = jnp.zeros(3)
-        return {"l_raw": jnp.zeros(3), "phi_raw": jnp.zeros(3), "alpha_raw": alpha_raw}
+        params = {"l_raw": jnp.zeros(3), "phi_raw": jnp.zeros(3), "alpha_raw": alpha_raw}
+        if key is not None and self.morph_init_scale > 0.0:
+            keys = jax.random.split(key, 3)
+            params = {
+                "l_raw":     params["l_raw"]     + jax.random.normal(keys[0], (3,)) * self.morph_init_scale,
+                "phi_raw":   params["phi_raw"]   + jax.random.normal(keys[1], (3,)) * self.morph_init_scale,
+                "alpha_raw": params["alpha_raw"] + jax.random.normal(keys[2], (3,)) * self.morph_init_scale,
+            }
+        return params
 
     def get_l(self, morph_params: dict) -> jnp.ndarray:
         return self.l_min + (self.l_max - self.l_min) * jax.nn.sigmoid(morph_params["l_raw"])

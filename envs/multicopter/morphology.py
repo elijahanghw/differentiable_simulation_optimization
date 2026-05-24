@@ -22,7 +22,7 @@ MAX_RPM = 3200 # rad/s
 
 KT = 4.00e-07
 KM = 4.00e-09
-PROP_DIAMETER = 0.0762  # 3 inch propeller → 3 * 0.0254 = 0.0762 m
+PROP_DIAMETER = 0.0762 + 0.02 # 3 inch propeller = 0.0762 m + 0.02 m tolerance
 
 LENGTH = 0.1
 WIDTH = 0.1

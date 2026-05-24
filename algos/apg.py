@@ -288,7 +288,7 @@ def train(config: Dict[str, Any]) -> Any:
     policy = make_model(pcfg["type"], pcfg, env.obs_dim, env.act_dim)
 
     key = jax.random.PRNGKey(seed)
-    key, init_key = jax.random.split(key)
+    key, init_key, morph_init_key = jax.random.split(key, 3)
     depth_shape = None
     if pcfg["type"] == "cnn_gru" and hasattr(env, "cam_height"):
         pool = getattr(env, "cam_pool", 2)
@@ -307,7 +307,7 @@ def train(config: Dict[str, Any]) -> Any:
         loss_fn = _build_loss_fn_pointmass(env, policy, horizon)
         grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
     elif has_traj_morph:
-        morph_params    = env.init_morph()
+        morph_params    = env.init_morph(morph_init_key)
         morph_schedule  = optax.cosine_decay_schedule(init_value=morph_lr, decay_steps=morph_epochs, alpha=morph_lr_min / morph_lr)
         morph_optimizer = optax.chain(
             optax.clip_by_global_norm(grad_clip),
@@ -336,7 +336,7 @@ def train(config: Dict[str, Any]) -> Any:
         loss_fn = _build_loss_fn_multicopter_traj(env, policy, horizon)
         grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
     elif has_morph:
-        morph_params    = env.init_morph()
+        morph_params    = env.init_morph(morph_init_key)
         morph_schedule  = optax.cosine_decay_schedule(init_value=morph_lr, decay_steps=morph_epochs, alpha=morph_lr_min / morph_lr)
         morph_optimizer = optax.chain(
             optax.clip_by_global_norm(grad_clip),
@@ -416,7 +416,7 @@ def train(config: Dict[str, Any]) -> Any:
             updates, policy_opt_state = policy_optimizer.update(grads, policy_opt_state)
             policy_params = optax.apply_updates(policy_params, updates)
 
-            if epoch % log_every == 0:
+            if epoch % log_every == 0 or epoch == epochs - 1:
                 logger.log({
                     "epoch":       epoch,
                     "mean_return": float(mean_return),
@@ -446,7 +446,7 @@ def train(config: Dict[str, Any]) -> Any:
                 )
                 morph_params = optax.apply_updates(morph_params, morph_updates)
 
-            if epoch % log_every == 0:
+            if epoch % log_every == 0 or epoch == epochs - 1:
                 log_data = {
                     "epoch":       epoch,
                     "mean_return": float(mean_return),
@@ -466,7 +466,7 @@ def train(config: Dict[str, Any]) -> Any:
             updates, policy_opt_state = policy_optimizer.update(grads, policy_opt_state)
             policy_params = optax.apply_updates(policy_params, updates)
 
-            if epoch % log_every == 0:
+            if epoch % log_every == 0 or epoch == epochs - 1:
                 logger.log({
                     "epoch":       epoch,
                     "mean_return": float(mean_return),
@@ -498,7 +498,7 @@ def train(config: Dict[str, Any]) -> Any:
                 )
                 morph_params = optax.apply_updates(morph_params, morph_updates)
 
-            if epoch % log_every == 0:
+            if epoch % log_every == 0 or epoch == epochs - 1:
                 log_data = {
                     "epoch":       epoch,
                     "mean_return": float(mean_return),
@@ -518,7 +518,7 @@ def train(config: Dict[str, Any]) -> Any:
             updates, policy_opt_state = policy_optimizer.update(grads, policy_opt_state)
             policy_params = optax.apply_updates(policy_params, updates)
 
-            if epoch % log_every == 0:
+            if epoch % log_every == 0 or epoch == epochs - 1:
                 logger.log({
                     "epoch":       epoch,
                     "mean_return": float(mean_return),

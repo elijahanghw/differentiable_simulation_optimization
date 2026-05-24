@@ -27,6 +27,7 @@ class Hover3d:
     alternating_alpha: bool = True  # [+a, -a, +a] pattern for positive-y arms → full [+a,-a,+a,-a,+a,-a]
 
     train_morphology: bool = True
+    morph_init_scale: float = 0.0  # std of Normal noise added to raw pre-sigmoid values; 0 = deterministic
     integrator: str = "rk4"
 
     # Initial state bounds [min, max] per DOF
@@ -168,7 +169,7 @@ class Hover3d:
         normalized = jnp.clip(normalized, 1e-6, 1.0 - 1e-6)
         return jnp.log(normalized / (1.0 - normalized))
 
-    def init_morph(self) -> dict:
+    def init_morph(self, key=None) -> dict:
         # raw = 0 → sigmoid(0) = 0.5 → midpoint of bounds for all params
         if self.alternating_alpha:
             alpha_raw = jnp.array([
@@ -178,7 +179,15 @@ class Hover3d:
             ])
         else:
             alpha_raw = jnp.zeros(3)
-        return {"l_raw": jnp.zeros(3), "phi_raw": jnp.zeros(3), "alpha_raw": alpha_raw}
+        params = {"l_raw": jnp.zeros(3), "phi_raw": jnp.zeros(3), "alpha_raw": alpha_raw}
+        if key is not None and self.morph_init_scale > 0.0:
+            keys = jax.random.split(key, 3)
+            params = {
+                "l_raw":     params["l_raw"]     + jax.random.normal(keys[0], (3,)) * self.morph_init_scale,
+                "phi_raw":   params["phi_raw"]   + jax.random.normal(keys[1], (3,)) * self.morph_init_scale,
+                "alpha_raw": params["alpha_raw"] + jax.random.normal(keys[2], (3,)) * self.morph_init_scale,
+            }
+        return params
 
     def get_l(self, morph_params: dict) -> jnp.ndarray:
         return self.l_min + (self.l_max - self.l_min) * jax.nn.sigmoid(morph_params["l_raw"])
