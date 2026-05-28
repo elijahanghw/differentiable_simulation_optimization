@@ -5,7 +5,7 @@ from .morphology import morphology
 from .quat_math import euler_to_quat, quat_to_euler, quat_mul
 
 
-class Hover3d:
+class Hover:
     # state: [pos(3), vel(3), quat(4), omega(3), W(6)] = 19
     # obs:   [pos(3), vel(3), euler(3), omega(3), W(6)] = 18
     obs_dim: int = 18

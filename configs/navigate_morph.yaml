@@ -5,7 +5,7 @@ env:
   name: navigate
   integrator: semi_implicit_euler
   train_morphology: true
-  morph_init_scale: 0.5
+  morph_init_scale: 1.0
   alternating_alpha: false
   alpha_default: 0.0
   grad_decay: 0.4
@@ -49,9 +49,9 @@ env:
     arena_z_max: -0.5
 
     # Obstacle counts
-    n_spheres:  10
-    n_boxes:    10
-    n_capsules: 10
+    n_spheres:  15
+    n_boxes:    15
+    n_capsules: 15
     n_windows: 0
 
     # Sphere size
@@ -100,15 +100,15 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 5000
-  morph_epochs: 4000
+  epochs: 3000 #5000
+  morph_epochs: 2000 #4000
   morphological_loss: true
   morphological_loss_weight: 500.0
   horizon: 250
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-5
-  morph_lr: 5.0e-3
+  morph_lr: 1.0e-2 #5.0e-3
   morph_lr_min: 1.0e-3
   grad_clip: 1.0
   log_interval: 10

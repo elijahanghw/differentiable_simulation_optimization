@@ -168,7 +168,7 @@ def _norm_proc_depth(proc, cam_max_range):
     return np.clip((proc - d_min) / (d_max - d_min), 0.0, 1.0).astype(np.float32)
 
 
-def run_rollout(env, policy, policy_params, key, steps):
+def run_rollout(env, policy, policy_params, morph_params, key, steps):
     reset_key, _ = jax.random.split(key)
     (depth_img, obs_vec), state, _ = env.reset(reset_key)
 
@@ -182,7 +182,7 @@ def run_rollout(env, policy, policy_params, key, steps):
         action, hidden = policy.apply(
             {"params": policy_params}, depth_img, obs_vec, hidden
         )
-        state, _ = env.step(state, action)
+        state, _ = env.step(state, action, morph_params)
         depth_img, obs_vec = env._get_obs(state)
 
         all_states.append(np.array(state))
@@ -226,13 +226,7 @@ def visualise(env, all_states, raw_depths, proc_depths, l, phi, alpha, dt):
         for i in range(6)
     ])  # (6, n_pts, 3)
 
-    fov_d = 0.2; fov_h = 0.1
-    fov_corners_body = np.array([        # camera looks in +x (FRD forward)
-        [fov_d, -fov_h, -fov_h],
-        [fov_d,  fov_h, -fov_h],
-        [fov_d,  fov_h,  fov_h],
-        [fov_d, -fov_h,  fov_h],
-    ])
+    cam_arrow_body = np.array([0.25, 0.0, 0.0])  # camera points in +x (FRD forward)
 
     for t, (state, raw_depth, proc_depth) in enumerate(zip(all_states, raw_depths, proc_depths)):
         rr.set_time("time", duration=t * dt)
@@ -257,12 +251,11 @@ def visualise(env, all_states, raw_depths, proc_depths, l, phi, alpha, dt):
         ]
         rr.log("drone/discs", rr.LineStrips3D(disc_strips, colors=[[80, 220, 80]], radii=0.003))
 
-        corners_w = pos + (R @ fov_corners_body.T).T  # (4, 3)
-        rr.log("drone/fov", rr.LineStrips3D([
-            np.stack([corners_w[0], pos, corners_w[1]]),          # tl–apex–tr
-            np.stack([corners_w[2], pos, corners_w[3]]),          # br–apex–bl
-            corners_w[[0, 1, 2, 3, 0]],                           # rectangle
-        ], colors=[[255, 200, 50, 160]], radii=0.005))
+        cam_vec_w = R @ cam_arrow_body
+        rr.log("drone/cam", rr.Arrows3D(
+            origins=[pos], vectors=[cam_vec_w],
+            colors=[[255, 200, 50, 255]], radii=0.006,
+        ))
 
         rr.log("drone/depth_image",      rr.Image(_norm_depth(raw_depth, env.cam_max_range)))
         rr.log("drone/proc_depth_image", rr.Image(_norm_proc_depth(proc_depth, env.cam_max_range)))
@@ -322,7 +315,7 @@ def main():
 
     key = jax.random.PRNGKey(args.seed)
     print("Running rollout …")
-    all_states, raw_depths, proc_depths = run_rollout(env, policy, policy_params, key, args.steps)
+    all_states, raw_depths, proc_depths = run_rollout(env, policy, policy_params, morph_params, key, args.steps)
     print(f"  {len(all_states)} states collected")
 
     rr.init("navigate_rollout")

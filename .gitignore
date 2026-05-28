@@ -11,10 +11,15 @@ checkpoints/
 
 # Logs
 logs/
+plots/
 
 # Rerun recordings
+rerun_rollouts/
 *.rrd
 
 .vscode
 DiffPhysDrone-v1.0
 .claude
+
+# Scripts
+*.sh

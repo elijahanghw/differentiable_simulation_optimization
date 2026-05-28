@@ -1,14 +1,10 @@
-from .quad_2d.hover import Hover2d
-from .multicopter.hover import Hover3d
+from .multicopter.hover import Hover
 from .multicopter.navigate import Navigate
-from .pointmass.navigate import PointMassNavigate
 
 
 ENV_REGISTRY = {
-    "hover_2d": Hover2d,
-    "hover_3d": Hover3d,
+    "hover": Hover,
     "navigate": Navigate,
-    "pointmass_navigate": PointMassNavigate,
 }
 
 
