@@ -1,15 +1,15 @@
-import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "depth_render"))
+import os, sys, yaml
+# sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "depth_render"))
 
 import jax
 import jax.numpy as jnp
-from .dynamics import forward_euler, semi_implicit_euler, rk4, _gdecay
-from .morphology import morphology, PROP_DIAMETER
-from .quat_math import euler_to_quat, quat_to_euler, quat_to_rotmat
-from .scene import SceneConfig
+from ..drone_physics.dynamics import forward_euler, semi_implicit_euler, rk4, _gdecay
+from ..drone_physics.morphology import morphology, PROP_DIAMETER
+from ..drone_physics.quat_math import euler_to_quat, quat_to_euler, quat_to_rotmat
+from ..scene.scene import SceneConfig
 
-from renderer import render_depth, apply_sensor_noise  # depth_render/renderer.py
-from primitives import (                               # depth_render/primitives.py
+from JADS.depth_render.renderer import render_depth, apply_sensor_noise  # depth_render/renderer.py
+from JADS.depth_render.primitives import (                               # depth_render/primitives.py
     point_sphere_dist, point_aabb_dist,
     point_capsule_dist, point_plane_dist,
 )
@@ -110,6 +110,9 @@ class Navigate:
             self.scene_cfg = SceneConfig()
         elif isinstance(scene, dict):
             self.scene_cfg = SceneConfig(**scene)
+        elif isinstance(scene, str):
+            with open(scene) as f:
+                self.scene_cfg = SceneConfig(**yaml.safe_load(f))
         else:
             self.scene_cfg = scene
 

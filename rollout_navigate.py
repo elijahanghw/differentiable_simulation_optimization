@@ -20,11 +20,11 @@ import jax.numpy as jnp
 import rerun as rr
 import yaml
 
-from envs import make_env
-from envs.multicopter.quat_math import quat_to_rotmat, quat_to_euler
-from envs.multicopter.morphology import PROP_DIAMETER
-from models import make_model
-from utils.checkpoint import load as load_checkpoint
+from JADS.tasks import make_env
+from JADS.drone_physics.quat_math import quat_to_rotmat, quat_to_euler
+from JADS.drone_physics.morphology import PROP_DIAMETER
+from JADS.models import make_model
+from JADS.utils.checkpoint import load as load_checkpoint
 
 
 def parse_args():

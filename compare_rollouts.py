@@ -28,8 +28,8 @@ import numpy as np
 import rerun as rr
 import yaml
 
-from envs import make_env
-from envs.multicopter.hover import Hover3d
+from tasks import make_env
+from tasks.multicopter.hover import Hover3d
 from models import make_model
 from utils.checkpoint import load as load_checkpoint
 from rollout import run_rollout, visualise_2d, visualise_3d

@@ -1,0 +1,16 @@
+# Random mixed obstacles — 10 spheres, 10 boxes, 10 capsules.
+arena_x_min:  2.0
+arena_x_max:  8.0
+arena_y_min: -5.0
+arena_y_max:  5.0
+arena_z_min: -1.0
+arena_z_max: 0.0
+
+n_boxes:    20
+
+box_hx_min: 0.10
+box_hx_max: 0.25
+box_hy_min: 0.10
+box_hy_max: 0.25
+box_hz_min: 3.00
+box_hz_max: 5.00

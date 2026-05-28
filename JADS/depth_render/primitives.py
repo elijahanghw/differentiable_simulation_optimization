@@ -202,8 +202,9 @@ def ray_infinite_plane(
 # All functions are pure JAX — JIT-able and vmap-able.
 
 def _safe_norm(v: jnp.ndarray) -> jnp.ndarray:
-    """Euclidean norm with a small epsilon to keep gradient finite at zero."""
-    return jnp.sqrt(jnp.maximum(jnp.dot(v, v), 1e-12))
+    # sqrt(||v||^2 + eps^2): smooth gradient everywhere, no discontinuity at ||v||=0.
+    # Biases the norm by at most 1mm — negligible for obstacle radii >= 0.1m.
+    return jnp.sqrt(jnp.dot(v, v) + 1e-6)
 
 
 def point_sphere_dist(

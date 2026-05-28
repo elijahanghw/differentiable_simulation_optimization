@@ -24,11 +24,11 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from envs import make_env
-from envs.multicopter.morphology import propeller_collision_loss_from_params
-from models import make_model, init_params
-from utils.logger import Logger
-from utils.checkpoint import save as save_checkpoint
+from JADS.tasks import make_env
+from JADS.drone_physics.morphology import propeller_collision_loss_from_params
+from JADS.models import make_model, init_params
+from JADS.utils.logger import Logger
+from JADS.utils.checkpoint import save as save_checkpoint
 
 
 # ---------------------------------------------------------------------------

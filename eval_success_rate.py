@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import yaml
 
-from envs import make_env
+from tasks import make_env
 from models import make_model
 from utils.checkpoint import load as load_checkpoint
 

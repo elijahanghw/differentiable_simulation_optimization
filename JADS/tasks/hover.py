@@ -1,8 +1,8 @@
 import jax
 import jax.numpy as jnp
-from .dynamics import forward_euler, semi_implicit_euler, rk4
-from .morphology import morphology
-from .quat_math import euler_to_quat, quat_to_euler, quat_mul
+from ..drone_physics.dynamics import forward_euler, semi_implicit_euler, rk4
+from ..drone_physics.morphology import morphology
+from ..drone_physics.quat_math import euler_to_quat, quat_to_euler, quat_mul
 
 
 class Hover:

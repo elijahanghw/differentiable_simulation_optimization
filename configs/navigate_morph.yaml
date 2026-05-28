@@ -38,50 +38,8 @@ env:
   target_z_max: -1.5
 
   # ---- Scene (random obstacles) -----------------------------------------
-  # All keys map directly to SceneConfig fields (see envs/multicopter/scene.py)
-  scene:
-    # Arena bounds — obstacles are spawned inside this box
-    arena_x_min: 2.0
-    arena_x_max: 8.0
-    arena_y_min: -5.0
-    arena_y_max: 5.0
-    arena_z_min: -4.0
-    arena_z_max: -0.5
-
-    # Obstacle counts
-    n_spheres:  15
-    n_boxes:    15
-    n_capsules: 15
-    n_windows: 0
-
-    # Sphere size
-    sphere_r_min: 0.15
-    sphere_r_max: 0.60
-
-    # Box half-extents per axis
-    box_hx_min: 0.10
-    box_hx_max: 0.60
-    box_hy_min: 0.10
-    box_hy_max: 0.60
-    box_hz_min: 0.10
-    box_hz_max: 0.60
-
-    # Capsule size
-    capsule_r_min: 0.10
-    capsule_r_max: 0.40
-    capsule_hh_min: 0.30
-    capsule_hh_max: 1.20
-
-    # Windows — solid walls with a rectangular hole, facing +x (drone forward)
-    # window_positions: list of [x, y, z] centres, one per window
-    # window_w/h: inner opening width (y) and height (z)
-    # window_border: solid wall on each side of the opening (y and z)
-    # window_depth: wall thickness in x
-    window_positions: [[5.0, 0.0, -1.5]]
-    window_w: 1.0
-    window_h: 1.0
-    window_border: 3
-    window_depth: 0.2
+  # Path to a scene YAML in scene/ — or replace with an inline dict.
+  scene: scene/obstacles_dense.yaml
 
 # -----------------------------------------------------------------------
 # Policy

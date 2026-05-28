@@ -1,0 +1,14 @@
+# Single window obstacle — drone must fly through the opening.
+arena_x_min:  2.0
+arena_x_max:  8.0
+arena_y_min: -5.0
+arena_y_max:  5.0
+arena_z_min: -4.0
+arena_z_max: -0.5
+
+n_windows: 1
+window_positions: [[5.0, 0.0, -1.5]]
+window_w:      1.5   # opening width  (y)
+window_h:      1.5   # opening height (z)
+window_border: 3     # solid border around opening
+window_depth:  0.5   # wall thickness (x)

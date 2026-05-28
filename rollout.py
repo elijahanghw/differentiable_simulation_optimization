@@ -17,10 +17,10 @@ import numpy as np
 import rerun as rr
 import yaml
 
-from envs import make_env
-from envs.multicopter.hover import Hover3d
-from envs.multicopter.quat_math import quat_to_rotmat
-from envs.multicopter.morphology import morphology, PROP_DIAMETER
+from tasks import make_env
+from tasks.multicopter.hover import Hover3d
+from tasks.multicopter.quat_math import quat_to_rotmat
+from tasks.multicopter.morphology import morphology, PROP_DIAMETER
 from models import make_model
 from utils.checkpoint import load as load_checkpoint
 
@@ -223,7 +223,7 @@ def visualise_3d(states, l, dt, prefix="drone", phi=None, alpha=None):
     ))
 
     # Time-series: pos, vel, euler, omega
-    from envs.multicopter.quat_math import quat_to_euler as _quat_to_euler
+    from tasks.multicopter.quat_math import quat_to_euler as _quat_to_euler
     for t in range(len(states)):
         rr.set_time("time", duration=t * dt)
         rr.log(f"{prefix}/state/x",     rr.Scalars(float(states[t, 0])))

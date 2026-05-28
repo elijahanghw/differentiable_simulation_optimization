@@ -1,5 +1,5 @@
-from .multicopter.hover import Hover
-from .multicopter.navigate import Navigate
+from .hover import Hover
+from .navigate import Navigate
 
 
 ENV_REGISTRY = {

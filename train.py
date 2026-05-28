@@ -24,12 +24,31 @@ from typing import Any, Dict
 
 import yaml
 
-from algos import ALGO_REGISTRY
+from JADS.algos import ALGO_REGISTRY
 
 
 def load_config(path: str) -> Dict[str, Any]:
     with open(path) as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    _resolve_scene_ref(config, path)
+    return config
+
+
+def _resolve_scene_ref(config: Dict[str, Any], config_path: str) -> None:
+    """If env.scene is a path string, load it and replace with the parsed dict."""
+    scene = config.get("env", {}).get("scene")
+    if not isinstance(scene, str):
+        return
+    # Resolve relative to config file directory, then fall back to cwd
+    candidates = [Path(config_path).parent / scene, Path(scene)]
+    for candidate in candidates:
+        if candidate.exists():
+            with open(candidate) as f:
+                config["env"]["scene"] = yaml.safe_load(f)
+            return
+    raise FileNotFoundError(
+        f"Scene config '{scene}' not found (tried: {[str(c) for c in candidates]})"
+    )
 
 
 def apply_overrides(config: Dict[str, Any], args: argparse.Namespace) -> None:

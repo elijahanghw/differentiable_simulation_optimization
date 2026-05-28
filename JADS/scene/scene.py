@@ -13,7 +13,7 @@ The flat layout inside scene_array (Nb_t = n_boxes + 4*n_windows):
     [Ns*4        : Ns*4+Nb_t*3 ]  box centres      (Nb_t, 3)  — regular boxes then window bars
     [Ns*4+Nb_t*3 : Ns*4+Nb_t*6 ]  box half-extents (Nb_t, 3)  — AABB only, no rotation
     [Ns*4+Nb_t*6 : ...]           capsule params   (Nc, 8)
-        per capsule: [cx, cy, cz, ax, ay, az, half_h, r]
+        per entry: [cx, cy, cz, ax, ay, az, half_h, r]
 
 Window obstacles (n_windows) are solid walls facing +x (drone forward) with a rectangular
 hole cut out. Each is decomposed into 4 AABBs (top/bottom/left/right slabs) at sample time.
@@ -46,9 +46,9 @@ class SceneConfig:
     arena_z_min: float = -4.0; arena_z_max: float = 0.0
 
     # ---- Obstacle counts ---------------------------------------------------
-    n_spheres:  int = 4
-    n_boxes:    int = 4
-    n_capsules: int = 4
+    n_spheres:  int = 0
+    n_boxes:    int = 0
+    n_capsules: int = 0
     n_windows:  int = 0   # wall-with-window obstacles (each = 4 AABBs)
 
     # ---- Sphere size bounds ------------------------------------------------
@@ -74,7 +74,6 @@ class SceneConfig:
     #   window_h: 1.0      # opening height (z axis)
     #   window_border: 0.5 # solid border around the opening on each side
     #   window_depth: 0.2  # wall thickness (x axis)
-    n_windows:        int   = 0
     window_positions: list  = _field(default_factory=list)  # [[x,y,z], …] len n_windows
     window_w:         float = 0.8
     window_h:         float = 0.8
@@ -102,7 +101,7 @@ class SceneConfig:
         Ns, Nb, Nc = self.n_spheres, self.n_boxes, self.n_capsules
 
         # 4 keys for spheres + 6 for boxes + 7 for capsules = 17 total
-        k = jax.random.split(key, 18)
+        k = jax.random.split(key, 17)
         i = 0
 
         # ---- Spheres -------------------------------------------------------
@@ -142,7 +141,7 @@ class SceneConfig:
         axes = jnp.stack([ax, ay, az], axis=-1)  # (Nc, 3), unit vectors
 
         c_hh = jax.random.uniform(k[i], shape=(Nc,), minval=self.capsule_hh_min, maxval=self.capsule_hh_max); i+=1
-        c_r  = jax.random.uniform(k[i], shape=(Nc,), minval=self.capsule_r_min,  maxval=self.capsule_r_max)
+        c_r  = jax.random.uniform(k[i], shape=(Nc,), minval=self.capsule_r_min,  maxval=self.capsule_r_max); i+=1
 
         # Pack capsule params row-wise: (Nc, 8) → flat (Nc*8,)
         capsule_params = jnp.concatenate([
@@ -209,14 +208,15 @@ class SceneConfig:
             capsule_hh        (Nc,)     half-heights
             capsule_radii     (Nc,)
         """
-        Ns, Nc = self.n_spheres, self.n_capsules
-        Nb_t = self.n_boxes + 4 * self.n_windows   # regular boxes + window bars
+        Ns   = self.n_spheres
+        Nb_t = self.n_boxes + 4 * self.n_windows
+        Nc   = self.n_capsules
         i = 0
 
-        sphere_centers   = scene_array[i : i+Ns*3].reshape(Ns, 3);    i += Ns*3
-        sphere_radii     = scene_array[i : i+Ns];                      i += Ns
-        box_centers      = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3); i += Nb_t*3
-        box_half_extents = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3); i += Nb_t*3
+        sphere_centers   = scene_array[i : i+Ns*3].reshape(Ns, 3);      i += Ns*3
+        sphere_radii     = scene_array[i : i+Ns];                        i += Ns
+        box_centers      = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);  i += Nb_t*3
+        box_half_extents = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);  i += Nb_t*3
         capsule_flat     = scene_array[i : i+Nc*8].reshape(Nc, 8)
 
         return {

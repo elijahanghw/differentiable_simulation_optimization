@@ -19,8 +19,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from camera     import generate_rays
-from primitives import ray_sphere, ray_aabb, ray_capsule, ray_infinite_plane
+from .camera     import generate_rays
+from .primitives import ray_sphere, ray_aabb, ray_capsule, ray_infinite_plane
 
 
 # ---------------------------------------------------------------------------
