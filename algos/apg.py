@@ -16,6 +16,7 @@ For each epoch:
   5. Backpropagate with jax.value_and_grad and update with Adam.
 """
 
+import os
 import time
 from typing import Any, Dict
 
@@ -400,8 +401,16 @@ def train(config: Dict[str, Any]) -> Any:
         print(f"Optim        : Adam lr={lr}  grad_clip={grad_clip}  gamma={gamma}")
     print("-" * 60)
 
+    # -- Persistent XLA compilation cache ----------------------------------
+    # Cache key = XLA program hash, so a new env/policy/batch_size/horizon
+    # automatically gets its own entry and recompiles.
+    _cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".jax_cache")
+    os.makedirs(os.path.abspath(_cache_dir), exist_ok=True)
+    jax.config.update("jax_compilation_cache_dir", os.path.abspath(_cache_dir))
+
     # -- Main loop ----------------------------------------------------------
     reset_fn = jax.jit(jax.vmap(env.reset))
+    print("(JIT compiles on epoch 0 — cached to .jax_cache/ for future runs)")
     t_start = time.time()
 
     for epoch in range(epochs):

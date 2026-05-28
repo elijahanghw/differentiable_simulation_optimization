@@ -17,9 +17,11 @@ plots/
 rerun_rollouts/
 *.rrd
 
+# Additional cache
 .vscode
 DiffPhysDrone-v1.0
 .claude
+.jax_cache
 
 # Scripts
 *.sh
