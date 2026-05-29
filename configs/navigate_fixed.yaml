@@ -81,5 +81,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_fixed_columns_logs.csv
-  checkpoint_path: checkpoints/navigate_fixed_columns.pkl
+  csv_path: logs/navigate_fixed_capsule_logs.csv
+  checkpoint_path: checkpoints/navigate_fixed_capsule.pkl

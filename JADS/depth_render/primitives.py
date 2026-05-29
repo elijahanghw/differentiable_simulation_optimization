@@ -132,37 +132,44 @@ def ray_capsule(
     Returns:
         Scalar t ≥ 0, or jnp.inf on miss.
     """
-    A  = center - half_h * axis
-    AB = 2.0 * half_h * axis
-    AO = ray_o - A
+    AO = ray_o - (center - half_h * axis)
 
-    ab_len2  = jnp.dot(AB, AB)
-    d_along  = jnp.dot(ray_d, AB)
-    ao_along = jnp.dot(AO, AB)
+    d_along  = jnp.dot(ray_d, axis)
+    ao_along = jnp.dot(AO, axis)
 
-    d_perp  = ray_d - (d_along  / ab_len2) * AB
-    ao_perp = AO    - (ao_along / ab_len2) * AB
-
-    a_q  = jnp.dot(d_perp, d_perp)
-    b_q  = 2.0 * jnp.dot(d_perp, ao_perp)
-    disc = b_q * b_q - 4.0 * a_q * (jnp.dot(ao_perp, ao_perp) - radius * radius)
+    # Exploit ||ray_d||=1 and ||axis||=1 — no explicit perp vectors needed
+    a_q    = 1.0 - d_along * d_along
+    b_half = jnp.dot(ray_d, AO) - d_along * ao_along
+    c_q    = jnp.dot(AO, AO) - ao_along * ao_along - radius * radius
+    disc   = b_half * b_half - a_q * c_q
 
     safe_a    = jnp.where(a_q > 1e-12, a_q, 1.0)
     sqrt_disc = jnp.sqrt(jnp.maximum(disc, 0.0))
+    # Normalize projections by segment length so the segment check compares
+    # against a constant [0, 1] rather than a traced half_h — avoids keeping
+    # half_h live inside the closure, reducing register pressure under vmap.
+    inv_len    = 0.5 / half_h
+    d_along_n  = d_along  * inv_len
+    ao_along_n = ao_along * inv_len
 
     def cyl_t(t_try):
-        proj  = (ao_along + t_try * d_along) / ab_len2
+        proj  = ao_along_n + t_try * d_along_n
         valid = (disc >= 0.0) & (a_q > 1e-12) & (t_try > 1e-4) & (proj >= 0.0) & (proj <= 1.0)
         return jnp.where(valid, t_try, jnp.inf)
-
-    t_cyl = jnp.minimum(
-        cyl_t((-b_q - sqrt_disc) / (2.0 * safe_a)),
-        cyl_t((-b_q + sqrt_disc) / (2.0 * safe_a)),
+    
+    return jnp.minimum(
+        cyl_t((-b_half - sqrt_disc) / safe_a),
+        cyl_t((-b_half + sqrt_disc) / safe_a),
     )
-    return t_cyl
-    # t_capA = ray_sphere(ray_o, ray_d, A, radius)
-    # t_capB = ray_sphere(ray_o, ray_d, B, radius)
-    # return jnp.minimum(t_cyl, jnp.minimum(t_capA, t_capB))
+
+    # t_cyl = jnp.minimum(
+    #     cyl_t((-b_half - sqrt_disc) / safe_a),
+    #     cyl_t((-b_half + sqrt_disc) / safe_a),
+    # )
+    # return jnp.minimum(t_cyl, jnp.minimum(
+    #     ray_sphere(ray_o, ray_d, center - half_h * axis, radius),
+    #     ray_sphere(ray_o, ray_d, center + half_h * axis, radius),
+    # ))
 
 
 def ray_infinite_plane(
