@@ -32,52 +32,6 @@ _GROUND_NRM = jnp.array([0., 0., -1.], dtype=jnp.float32)
 
 
 # ---------------------------------------------------------------------------
-# Per-ray depth computation
-# ---------------------------------------------------------------------------
-
-def _depth_for_ray(
-    o: jnp.ndarray,               # (3,) ray origin
-    d: jnp.ndarray,               # (3,) unit ray direction
-    sphere_centers:   jnp.ndarray,  # (Ns, 3)
-    sphere_radii:     jnp.ndarray,  # (Ns,)
-    box_centers:      jnp.ndarray,  # (Nb, 3)
-    box_half_extents: jnp.ndarray,  # (Nb, 3)
-    capsule_centers:  jnp.ndarray,  # (Nc, 3)
-    capsule_axes:     jnp.ndarray,  # (Nc, 3)
-    capsule_hh:       jnp.ndarray,  # (Nc,)
-    capsule_radii:    jnp.ndarray,  # (Nc,)
-) -> jnp.ndarray:                   # scalar float32
-    """Nearest hit distance for a single ray against all scene primitives."""
-    depth = jnp.array(jnp.inf, dtype=jnp.float32)
-
-    # Ground plane (always present)
-    depth = jnp.minimum(depth, ray_infinite_plane(o, d, _GROUND_PT, _GROUND_NRM))
-
-    # Spheres — vmap over Ns primitives; Python `if` is static at trace time
-    if sphere_centers.shape[0] > 0:
-        ts = jax.vmap(lambda c, r: ray_sphere(o, d, c, r))(
-            sphere_centers, sphere_radii
-        )
-        depth = jnp.minimum(depth, jnp.min(ts))
-
-    # Axis-aligned boxes — vmap over Nb primitives
-    if box_centers.shape[0] > 0:
-        ts = jax.vmap(lambda c, he: ray_aabb(o - c, d, -he, he))(
-            box_centers, box_half_extents
-        )
-        depth = jnp.minimum(depth, jnp.min(ts))
-
-    # Capsules — vmap over Nc primitives
-    if capsule_centers.shape[0] > 0:
-        ts = jax.vmap(lambda c, ax, hh, r: ray_capsule(o, d, c, ax, hh, r))(
-            capsule_centers, capsule_axes, capsule_hh, capsule_radii
-        )
-        depth = jnp.minimum(depth, jnp.min(ts))
-
-    return depth
-
-
-# ---------------------------------------------------------------------------
 # Main renderer — pure JAX, JIT/vmap-able
 # ---------------------------------------------------------------------------
 
@@ -102,6 +56,10 @@ def render_depth(
     All geometry is passed as JAX arrays — no Python scene objects.
     Safe to jax.jit and jax.vmap over environment batches.
 
+    Vmap order: outer over primitives (small), inner over rays (large).
+    Each GPU thread handles one ray vs one primitive — low register pressure
+    and no shared-memory blowup regardless of primitive count.
+
     Args:
         position:   (3,)      drone / camera world position.
         quaternion: (4,)      drone body quaternion [qw, qx, qy, qz].
@@ -114,16 +72,33 @@ def render_depth(
     """
     rays_o, rays_d = generate_rays(position, quaternion, fov_deg, width, height)
 
-    depth_flat = jax.vmap(
-        lambda o, d: _depth_for_ray(
-            o, d,
-            sphere_centers, sphere_radii,
-            box_centers, box_half_extents,
-            capsule_centers, capsule_axes, capsule_hh, capsule_radii,
-        )
+    # Ground plane — one vmap over all rays
+    depth = jax.vmap(
+        lambda o, d: ray_infinite_plane(o, d, _GROUND_PT, _GROUND_NRM)
     )(rays_o, rays_d)
 
-    return depth_flat.reshape(height, width)
+    # Spheres: (Ns, N_rays) — outer vmap over primitives, inner over rays
+    if sphere_centers.shape[0] > 0:
+        sphere_depths = jax.vmap(
+            lambda c, r: jax.vmap(lambda o, d: ray_sphere(o, d, c, r))(rays_o, rays_d)
+        )(sphere_centers, sphere_radii)
+        depth = jnp.minimum(depth, jnp.min(sphere_depths, axis=0))
+
+    # Boxes: (Nb, N_rays)
+    if box_centers.shape[0] > 0:
+        box_depths = jax.vmap(
+            lambda c, he: jax.vmap(lambda o, d: ray_aabb(o - c, d, -he, he))(rays_o, rays_d)
+        )(box_centers, box_half_extents)
+        depth = jnp.minimum(depth, jnp.min(box_depths, axis=0))
+
+    # Capsules: (Nc, N_rays)
+    if capsule_centers.shape[0] > 0:
+        capsule_depths = jax.vmap(
+            lambda c, ax, hh, r: jax.vmap(lambda o, d: ray_capsule(o, d, c, ax, hh, r))(rays_o, rays_d)
+        )(capsule_centers, capsule_axes, capsule_hh, capsule_radii)
+        depth = jnp.minimum(depth, jnp.min(capsule_depths, axis=0))
+
+    return depth.reshape(height, width)
 
 
 # ---------------------------------------------------------------------------
