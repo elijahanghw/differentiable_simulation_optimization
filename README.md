@@ -1,1 +1,1 @@
-# JADS: Just Another Drone/Differentiable Simulator
+# JADS: Just Another Differentiable/Drone Simulator
