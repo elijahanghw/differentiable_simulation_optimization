@@ -1,1 +1,1 @@
-# Differentiable Simulation for Joint Morphology and Policy Optimization
+# JADS: Just Another Drone/Differentiable Simulator
