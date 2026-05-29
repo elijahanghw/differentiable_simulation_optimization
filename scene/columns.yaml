@@ -9,8 +9,8 @@ arena_z_max: 0.0
 n_boxes:    20
 
 box_hx_min: 0.10
-box_hx_max: 0.25
+box_hx_max: 0.20
 box_hy_min: 0.10
-box_hy_max: 0.25
+box_hy_max: 0.20
 box_hz_min: 3.00
 box_hz_max: 5.00

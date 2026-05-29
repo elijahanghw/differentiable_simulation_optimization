@@ -133,39 +133,36 @@ def ray_capsule(
         Scalar t ≥ 0, or jnp.inf on miss.
     """
     A  = center - half_h * axis
-    B  = center + half_h * axis
-    AB = B - A          # = 2 * half_h * axis
+    AB = 2.0 * half_h * axis
     AO = ray_o - A
 
-    ab_len2  = jnp.dot(AB, AB)          # (2*half_h)²
+    ab_len2  = jnp.dot(AB, AB)
     d_along  = jnp.dot(ray_d, AB)
     ao_along = jnp.dot(AO, AB)
 
-    # Perpendicular-to-axis components
     d_perp  = ray_d - (d_along  / ab_len2) * AB
     ao_perp = AO    - (ao_along / ab_len2) * AB
 
-    # Quadratic for infinite-cylinder intersection
-    a_q = jnp.dot(d_perp, d_perp)
-    b_q = 2.0 * jnp.dot(d_perp, ao_perp)
-    c_q = jnp.dot(ao_perp, ao_perp) - radius * radius
-    disc = b_q * b_q - 4.0 * a_q * c_q
+    a_q  = jnp.dot(d_perp, d_perp)
+    b_q  = 2.0 * jnp.dot(d_perp, ao_perp)
+    disc = b_q * b_q - 4.0 * a_q * (jnp.dot(ao_perp, ao_perp) - radius * radius)
 
     safe_a    = jnp.where(a_q > 1e-12, a_q, 1.0)
     sqrt_disc = jnp.sqrt(jnp.maximum(disc, 0.0))
-    t_near = (-b_q - sqrt_disc) / (2.0 * safe_a)
-    t_far  = (-b_q + sqrt_disc) / (2.0 * safe_a)
 
     def cyl_t(t_try):
-        """Accept only hits within the cylindrical segment [0, 1] along AB."""
         proj  = (ao_along + t_try * d_along) / ab_len2
         valid = (disc >= 0.0) & (a_q > 1e-12) & (t_try > 1e-4) & (proj >= 0.0) & (proj <= 1.0)
         return jnp.where(valid, t_try, jnp.inf)
 
-    t_cyl  = jnp.minimum(cyl_t(t_near), cyl_t(t_far))
-    t_capA = ray_sphere(ray_o, ray_d, A, radius)
-    t_capB = ray_sphere(ray_o, ray_d, B, radius)
-    return jnp.minimum(t_cyl, jnp.minimum(t_capA, t_capB))
+    t_cyl = jnp.minimum(
+        cyl_t((-b_q - sqrt_disc) / (2.0 * safe_a)),
+        cyl_t((-b_q + sqrt_disc) / (2.0 * safe_a)),
+    )
+    return t_cyl
+    # t_capA = ray_sphere(ray_o, ray_d, A, radius)
+    # t_capB = ray_sphere(ray_o, ray_d, B, radius)
+    # return jnp.minimum(t_cyl, jnp.minimum(t_capA, t_capB))
 
 
 def ray_infinite_plane(
