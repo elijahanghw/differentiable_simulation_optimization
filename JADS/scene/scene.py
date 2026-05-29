@@ -7,13 +7,16 @@ methods that navigate.py calls from reset():
     scene_array          = cfg.sample(key)        → flat float32 JAX array
     scene_dict           = cfg.unpack(scene_array) → structured arrays
 
-The flat layout inside scene_array (Nb_t = n_boxes + 4*n_windows):
-    [0           : Ns*3        ]  sphere centres   (Ns, 3)
-    [Ns*3        : Ns*4        ]  sphere radii     (Ns,)
-    [Ns*4        : Ns*4+Nb_t*3 ]  box centres      (Nb_t, 3)  — regular boxes then window bars
-    [Ns*4+Nb_t*3 : Ns*4+Nb_t*6 ]  box half-extents (Nb_t, 3)  — AABB only, no rotation
-    [Ns*4+Nb_t*6 : ...]           capsule params   (Nc, 8)
+The flat layout inside scene_array (Ns_t = n_spheres + 2*n_capsules, Nb_t = n_boxes + 4*n_windows):
+    [0              : Ns_t*3         ]  sphere centres   (Ns_t, 3)  — regular spheres then 2*Nc end caps
+    [Ns_t*3         : Ns_t*4         ]  sphere radii     (Ns_t,)
+    [Ns_t*4         : Ns_t*4+Nb_t*3  ]  box centres      (Nb_t, 3)  — regular boxes then window bars
+    [Ns_t*4+Nb_t*3  : Ns_t*4+Nb_t*6  ]  box half-extents (Nb_t, 3)  — AABB only, no rotation
+    [Ns_t*4+Nb_t*6  : ...]              cylinder params  (Nc, 8)
         per entry: [cx, cy, cz, ax, ay, az, half_h, r]
+
+Capsules are composite geometry: each n_capsules entry decomposes into 1 cylinder (lateral body)
+and 2 end-cap spheres appended to the sphere block.
 
 Window obstacles (n_windows) are solid walls facing +x (drone forward) with a rectangular
 hole cut out. Each is decomposed into 4 AABBs (top/bottom/left/right slabs) at sample time.
@@ -84,7 +87,8 @@ class SceneConfig:
 
     def __post_init__(self):
         Ns, Nb, Nc, Nw = self.n_spheres, self.n_boxes, self.n_capsules, self.n_windows
-        self.scene_dim = Ns * 4 + (Nb + 4 * Nw) * 6 + Nc * 8
+        Ns_t = Ns + 2 * Nc  # regular spheres + 2 end-cap spheres per capsule
+        self.scene_dim = Ns_t * 4 + (Nb + 4 * Nw) * 6 + Nc * 8
 
     # -----------------------------------------------------------------------
     # Sampling
@@ -110,8 +114,8 @@ class SceneConfig:
         s_cz = jax.random.uniform(k[i], shape=(Ns,), minval=self.arena_z_min, maxval=self.arena_z_max); i+=1
         s_r  = jax.random.uniform(k[i], shape=(Ns,), minval=self.sphere_r_min, maxval=self.sphere_r_max); i+=1
 
-        sphere_centers = jnp.stack([s_cx, s_cy, s_cz], axis=-1).reshape(-1)  # (Ns*3,)
-        sphere_radii   = s_r                                                   # (Ns,)
+        sphere_centers = jnp.stack([s_cx, s_cy, s_cz], axis=-1)  # (Ns, 3)
+        sphere_radii   = s_r                                       # (Ns,)
 
         # ---- Boxes ---------------------------------------------------------
         b_cx = jax.random.uniform(k[i], shape=(Nb,), minval=self.arena_x_min, maxval=self.arena_x_max); i+=1
@@ -143,12 +147,21 @@ class SceneConfig:
         c_hh = jax.random.uniform(k[i], shape=(Nc,), minval=self.capsule_hh_min, maxval=self.capsule_hh_max); i+=1
         c_r  = jax.random.uniform(k[i], shape=(Nc,), minval=self.capsule_r_min,  maxval=self.capsule_r_max); i+=1
 
-        # Pack capsule params row-wise: (Nc, 8) → flat (Nc*8,)
-        capsule_params = jnp.concatenate([
-            jnp.stack([c_cx, c_cy, c_cz], axis=-1),  # (Nc, 3) centers
-            axes,                                      # (Nc, 3) unit axes
-            c_hh[:, None],                             # (Nc, 1) half-heights
-            c_r[:, None],                              # (Nc, 1) radii
+        # End-cap sphere centres at both tips of each cylinder
+        c_centers = jnp.stack([c_cx, c_cy, c_cz], axis=-1)  # (Nc, 3)
+        cap_a = c_centers - c_hh[:, None] * axes             # (Nc, 3)
+        cap_b = c_centers + c_hh[:, None] * axes             # (Nc, 3)
+
+        # Merge regular spheres with end-cap spheres
+        sphere_centers = jnp.concatenate([sphere_centers, cap_a, cap_b], axis=0)  # (Ns+2*Nc, 3)
+        sphere_radii   = jnp.concatenate([sphere_radii,   c_r,   c_r],  axis=0)   # (Ns+2*Nc,)
+
+        # Pack cylinder params row-wise: (Nc, 8) → flat (Nc*8,)
+        cylinder_params = jnp.concatenate([
+            c_centers,      # (Nc, 3) centers
+            axes,           # (Nc, 3) unit axes
+            c_hh[:, None],  # (Nc, 1) half-heights
+            c_r[:, None],   # (Nc, 1) radii
         ], axis=-1).reshape(-1)  # (Nc*8,)
 
         # ---- Windows (fixed positions, decomposed into 4 AABBs each) ----------
@@ -180,11 +193,11 @@ class SceneConfig:
             win_centers = win_half_extents = jnp.zeros(0)
 
         return jnp.concatenate([
-            sphere_centers,
+            sphere_centers.reshape(-1),
             sphere_radii,
             box_centers,      win_centers,
             box_half_extents, win_half_extents,
-            capsule_params,
+            cylinder_params,
         ])
 
     # -----------------------------------------------------------------------
@@ -199,35 +212,35 @@ class SceneConfig:
         can consume this output directly.
 
         Returns:
-            sphere_centers    (Ns, 3)
-            sphere_radii      (Ns,)
+            sphere_centers    (Ns+2*Nc, 3)  — regular spheres then 2*Nc end-cap spheres
+            sphere_radii      (Ns+2*Nc,)
             box_centers       (Nb, 3)
-            box_half_extents  (Nb, 3)  — axis-aligned boxes (no rotation)
-            capsule_centers   (Nc, 3)
-            capsule_axes      (Nc, 3)   unit axes
-            capsule_hh        (Nc,)     half-heights
-            capsule_radii     (Nc,)
+            box_half_extents  (Nb, 3)        — axis-aligned boxes (no rotation)
+            cylinder_centers  (Nc, 3)
+            cylinder_axes     (Nc, 3)        unit axes
+            cylinder_hh       (Nc,)          half-heights
+            cylinder_radii    (Nc,)
         """
-        Ns   = self.n_spheres
+        Ns_t = self.n_spheres + 2 * self.n_capsules
         Nb_t = self.n_boxes + 4 * self.n_windows
         Nc   = self.n_capsules
         i = 0
 
-        sphere_centers   = scene_array[i : i+Ns*3].reshape(Ns, 3);      i += Ns*3
-        sphere_radii     = scene_array[i : i+Ns];                        i += Ns
-        box_centers      = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);  i += Nb_t*3
-        box_half_extents = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);  i += Nb_t*3
-        capsule_flat     = scene_array[i : i+Nc*8].reshape(Nc, 8)
+        sphere_centers   = scene_array[i : i+Ns_t*3].reshape(Ns_t, 3);  i += Ns_t*3
+        sphere_radii     = scene_array[i : i+Ns_t];                       i += Ns_t
+        box_centers      = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);   i += Nb_t*3
+        box_half_extents = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);   i += Nb_t*3
+        cylinder_flat    = scene_array[i : i+Nc*8].reshape(Nc, 8)
 
         return {
-            "sphere_centers":   sphere_centers,
-            "sphere_radii":     sphere_radii,
-            "box_centers":      box_centers,
-            "box_half_extents": box_half_extents,
-            "capsule_centers":  capsule_flat[:, 0:3],
-            "capsule_axes":     capsule_flat[:, 3:6],
-            "capsule_hh":       capsule_flat[:, 6],
-            "capsule_radii":    capsule_flat[:, 7],
+            "sphere_centers":    sphere_centers,
+            "sphere_radii":      sphere_radii,
+            "box_centers":       box_centers,
+            "box_half_extents":  box_half_extents,
+            "cylinder_centers":  cylinder_flat[:, 0:3],
+            "cylinder_axes":     cylinder_flat[:, 3:6],
+            "cylinder_hh":       cylinder_flat[:, 6],
+            "cylinder_radii":    cylinder_flat[:, 7],
         }
 
     def summary(self) -> str:

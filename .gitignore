@@ -12,6 +12,7 @@ checkpoints/
 # Logs
 logs/
 plots/
+tmp/
 
 # Rerun recordings
 rerun_rollouts/

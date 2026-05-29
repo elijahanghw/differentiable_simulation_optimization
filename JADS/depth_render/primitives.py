@@ -106,7 +106,7 @@ def ray_obb(
     return ray_aabb(local_o, local_d, -half_extents, half_extents)
 
 
-def ray_capsule(
+def ray_cylinder(
     ray_o:  jnp.ndarray,
     ray_d:  jnp.ndarray,
     center: jnp.ndarray,
@@ -115,19 +115,18 @@ def ray_capsule(
     radius: float,
 ) -> jnp.ndarray:
     """
-    Ray–capsule intersection.
+    Ray–finite open cylinder intersection (lateral surface only, no end caps).
 
-    A capsule is the Minkowski sum of a line segment and a sphere:
-    the cylindrical body between (center - half_h*axis) and
-    (center + half_h*axis), capped with hemispheres of the given radius.
+    End caps are rendered as separate spheres at (center ± half_h * axis).
+    Together they form a capsule composite.
 
     Args:
         ray_o:  (3,) ray origin
         ray_d:  (3,) unit ray direction
-        center: (3,) capsule midpoint
-        axis:   (3,) unit axis of the capsule
+        center: (3,) cylinder midpoint
+        axis:   (3,) unit axis
         half_h: half-length of the cylindrical section
-        radius: radius of cylinder and end-cap spheres
+        radius: cylinder radius
 
     Returns:
         Scalar t ≥ 0, or jnp.inf on miss.
@@ -137,7 +136,6 @@ def ray_capsule(
     d_along  = jnp.dot(ray_d, axis)
     ao_along = jnp.dot(AO, axis)
 
-    # Exploit ||ray_d||=1 and ||axis||=1 — no explicit perp vectors needed
     a_q    = 1.0 - d_along * d_along
     b_half = jnp.dot(ray_d, AO) - d_along * ao_along
     c_q    = jnp.dot(AO, AO) - ao_along * ao_along - radius * radius
@@ -145,9 +143,8 @@ def ray_capsule(
 
     safe_a    = jnp.where(a_q > 1e-12, a_q, 1.0)
     sqrt_disc = jnp.sqrt(jnp.maximum(disc, 0.0))
-    # Normalize projections by segment length so the segment check compares
-    # against a constant [0, 1] rather than a traced half_h — avoids keeping
-    # half_h live inside the closure, reducing register pressure under vmap.
+    # Normalize projections so the segment check is against constant [0, 1],
+    # avoiding keeping half_h live inside the closure (reduces register pressure).
     inv_len    = 0.5 / half_h
     d_along_n  = d_along  * inv_len
     ao_along_n = ao_along * inv_len
@@ -156,20 +153,11 @@ def ray_capsule(
         proj  = ao_along_n + t_try * d_along_n
         valid = (disc >= 0.0) & (a_q > 1e-12) & (t_try > 1e-4) & (proj >= 0.0) & (proj <= 1.0)
         return jnp.where(valid, t_try, jnp.inf)
-    
+
     return jnp.minimum(
         cyl_t((-b_half - sqrt_disc) / safe_a),
         cyl_t((-b_half + sqrt_disc) / safe_a),
     )
-
-    # t_cyl = jnp.minimum(
-    #     cyl_t((-b_half - sqrt_disc) / safe_a),
-    #     cyl_t((-b_half + sqrt_disc) / safe_a),
-    # )
-    # return jnp.minimum(t_cyl, jnp.minimum(
-    #     ray_sphere(ray_o, ray_d, center - half_h * axis, radius),
-    #     ray_sphere(ray_o, ray_d, center + half_h * axis, radius),
-    # ))
 
 
 def ray_infinite_plane(

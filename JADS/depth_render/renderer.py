@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from .camera     import generate_rays
-from .primitives import ray_sphere, ray_aabb, ray_capsule, ray_infinite_plane
+from .primitives import ray_sphere, ray_aabb, ray_cylinder, ray_infinite_plane
 
 
 # ---------------------------------------------------------------------------
@@ -45,16 +45,20 @@ def render_depth(
     sphere_radii:     jnp.ndarray,   # (Ns,)
     box_centers:      jnp.ndarray,   # (Nb, 3)
     box_half_extents: jnp.ndarray,   # (Nb, 3)
-    capsule_centers:  jnp.ndarray,   # (Nc, 3)
-    capsule_axes:     jnp.ndarray,   # (Nc, 3)
-    capsule_hh:       jnp.ndarray,   # (Nc,)
-    capsule_radii:    jnp.ndarray,   # (Nc,)
+    cylinder_centers: jnp.ndarray,   # (Nc, 3)
+    cylinder_axes:    jnp.ndarray,   # (Nc, 3)
+    cylinder_hh:      jnp.ndarray,   # (Nc,)
+    cylinder_radii:   jnp.ndarray,   # (Nc,)
 ) -> jnp.ndarray:                    # (H, W) float32
     """
     Render a depth image.
 
     All geometry is passed as JAX arrays — no Python scene objects.
     Safe to jax.jit and jax.vmap over environment batches.
+
+    Capsules are composite: each is 1 cylinder + 2 end-cap spheres.
+    The sphere array already includes end-cap spheres; cylinder_* holds
+    the lateral-body geometry.
 
     Vmap order: outer over primitives (small), inner over rays (large).
     Each GPU thread handles one ray vs one primitive — low register pressure
@@ -65,7 +69,7 @@ def render_depth(
         quaternion: (4,)      drone body quaternion [qw, qx, qy, qz].
         fov_deg:    float     horizontal FOV in degrees (compile-time constant).
         width/height: int     image resolution (compile-time constants).
-        sphere_*/box_*/capsule_*: stacked geometry arrays from get_scene_arrays().
+        sphere_*/box_*/cylinder_*: stacked geometry arrays from SceneConfig.unpack().
 
     Returns:
         (H, W) float32 — ray-traced depth in metres, jnp.inf on no-hit.
@@ -91,12 +95,12 @@ def render_depth(
         )(box_centers, box_half_extents)
         depth = jnp.minimum(depth, jnp.min(box_depths, axis=0))
 
-    # Capsules: (Nc, N_rays)
-    if capsule_centers.shape[0] > 0:
-        capsule_depths = jax.vmap(
-            lambda c, ax, hh, r: jax.vmap(lambda o, d: ray_capsule(o, d, c, ax, hh, r))(rays_o, rays_d)
-        )(capsule_centers, capsule_axes, capsule_hh, capsule_radii)
-        depth = jnp.minimum(depth, jnp.min(capsule_depths, axis=0))
+    # Cylinders: (Nc, N_rays)
+    if cylinder_centers.shape[0] > 0:
+        cylinder_depths = jax.vmap(
+            lambda c, ax, hh, r: jax.vmap(lambda o, d: ray_cylinder(o, d, c, ax, hh, r))(rays_o, rays_d)
+        )(cylinder_centers, cylinder_axes, cylinder_hh, cylinder_radii)
+        depth = jnp.minimum(depth, jnp.min(cylinder_depths, axis=0))
 
     return depth.reshape(height, width)
 

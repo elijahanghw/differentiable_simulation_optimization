@@ -218,10 +218,10 @@ class Navigate:
                 sphere_radii     = arrays["sphere_radii"],
                 box_centers      = arrays["box_centers"],
                 box_half_extents = arrays["box_half_extents"],
-                capsule_centers  = arrays["capsule_centers"],
-                capsule_axes     = arrays["capsule_axes"],
-                capsule_hh       = arrays["capsule_hh"],
-                capsule_radii    = arrays["capsule_radii"],
+                cylinder_centers = arrays["cylinder_centers"],
+                cylinder_axes    = arrays["cylinder_axes"],
+                cylinder_hh      = arrays["cylinder_hh"],
+                cylinder_radii   = arrays["cylinder_radii"],
             ),
             min_range      = self.cam_min_range,
             max_range      = self.cam_max_range,
@@ -242,10 +242,10 @@ class Navigate:
                 sphere_radii     = arrays["sphere_radii"],
                 box_centers      = arrays["box_centers"],
                 box_half_extents = arrays["box_half_extents"],
-                capsule_centers  = arrays["capsule_centers"],
-                capsule_axes     = arrays["capsule_axes"],
-                capsule_hh       = arrays["capsule_hh"],
-                capsule_radii    = arrays["capsule_radii"],
+                cylinder_centers = arrays["cylinder_centers"],
+                cylinder_axes    = arrays["cylinder_axes"],
+                cylinder_hh      = arrays["cylinder_hh"],
+                cylinder_radii   = arrays["cylinder_radii"],
             ),
             min_range      = self.cam_min_range,
             max_range      = self.cam_max_range,
@@ -280,10 +280,10 @@ class Navigate:
                 ds = jax.vmap(lambda c, he: point_aabb_dist(pt, c, he))(
                     arrays["box_centers"], arrays["box_half_extents"])
                 d = jnp.minimum(d, jnp.min(ds))
-            if arrays["capsule_centers"].shape[0] > 0:
+            if arrays["cylinder_centers"].shape[0] > 0:
                 ds = jax.vmap(lambda c, ax, hh, r: point_capsule_dist(pt, c, ax, hh, r))(
-                    arrays["capsule_centers"], arrays["capsule_axes"],
-                    arrays["capsule_hh"], arrays["capsule_radii"])
+                    arrays["cylinder_centers"], arrays["cylinder_axes"],
+                    arrays["cylinder_hh"], arrays["cylinder_radii"])
                 d = jnp.minimum(d, jnp.min(ds))
             return d
 

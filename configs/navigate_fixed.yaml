@@ -23,8 +23,8 @@ env:
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
   init_x_max: 1.0
-  init_y_min: -3.0
-  init_y_max: 3.0
+  init_y_min: -2.0
+  init_y_max: 2.0
   init_z_min: -1.5
   init_z_max: -1.5
 
@@ -58,7 +58,7 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 3000
+  epochs: 2000
   horizon: 250
   batch_size: 64
   lr: 1.0e-3

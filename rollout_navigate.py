@@ -123,10 +123,10 @@ def log_scene(scene_cfg, scene_array):
             fill_mode="solid",
         ), static=True)
 
-    cc  = np.array(arrays["capsule_centers"])
-    ca  = np.array(arrays["capsule_axes"])
-    chh = np.array(arrays["capsule_hh"])
-    cr  = np.array(arrays["capsule_radii"])
+    cc  = np.array(arrays["cylinder_centers"])
+    ca  = np.array(arrays["cylinder_axes"])
+    chh = np.array(arrays["cylinder_hh"])
+    cr  = np.array(arrays["cylinder_radii"])
     if cc.shape[0] > 0:
         base_translations = cc - ca * chh[:, None]
         lengths = (2.0 * chh).astype(np.float32)
