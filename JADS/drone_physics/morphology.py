@@ -15,7 +15,7 @@ import jax.numpy as jnp
 # HEIGHT = 0.1
 
 # 3 inch drone
-BODY_MASS = 0.300
+BODY_MASS = 0.350
 MOTOR_MASS = 0.015
 ARM_DENSITY = 0.034 # kg/m
 MAX_RPM = 3200 # rad/s
@@ -138,36 +138,22 @@ def morphology(l, phi=None, alpha=None):
 
     return Bf, Bm, m, J, J_inv, propeller_positions
 
-def _seg_to_seg_dist(p0, p1, q0, q1, eps=1e-8):
-    """Minimum distance between two line segments P(s) and Q(t), s,t ∈ [0,1]."""
-    d1 = p1 - p0
-    d2 = q1 - q0
-    r  = p0 - q0
-    a  = jnp.dot(d1, d1)
-    e  = jnp.dot(d2, d2)
-    b  = jnp.dot(d1, d2)
-    c  = jnp.dot(d1, r)
-    f  = jnp.dot(d2, r)
-    D  = a * e - b * b
-    s  = jnp.clip((b * f - c * e) / (D + eps), 0.0, 1.0)
-    t  = jnp.clip((b * s + f)     / (e + eps), 0.0, 1.0)
-    s  = jnp.clip((b * t - c)     / (a + eps), 0.0, 1.0)
-    diff = (p0 + s * d1) - (q0 + t * d2)
+def _point_to_seg_dist(p, q0, q1, eps=1e-8):
+    """Distance from point p to line segment q0→q1."""
+    d = q1 - q0
+    t = jnp.dot(p - q0, d) / (jnp.dot(d, d) + eps)
+    closest = q0 + jnp.clip(t, 0.0, 1.0) * d
+    diff = p - closest
     return jnp.sqrt(jnp.dot(diff, diff) + eps)
 
 
 def propeller_collision_loss(propeller_positions, propeller_orientations, weight=100.0):
     """
-    Differentiable capsule-capsule collision loss for the 3 positive-y propellers.
+    Differentiable capsule-sphere collision loss for all 6 propellers.
 
-    Each propeller is modeled as a capsule:
-      - Radius:  PROP_DIAMETER / 2
-      - Height:  PROP_DIAMETER  (one diameter long)
-      - Axis:    downwash direction (-thrust), base at motor position
-
-    Only checks the 3 positive-y arms (indices 0,1,2) — 3 pairs total.
-    Negative-y arms are mirror-symmetric so if positive-y arms don't intersect,
-    neither will their mirrors.
+    For each pair (i, j) with i < j:
+      - Propeller i is the sphere:   center at propeller_positions[i], radius PROP_DIAMETER/2
+      - Propeller j is the capsule:  axis from propeller_positions[j] to tip[j], radius PROP_DIAMETER/2
 
     Args:
         propeller_positions:    (6, 3) motor positions in body frame
@@ -177,20 +163,19 @@ def propeller_collision_loss(propeller_positions, propeller_orientations, weight
     Returns:
         scalar loss
     """
-    r = PROP_DIAMETER / 2   # capsule radius
-    h = PROP_DIAMETER       # capsule height (cylinder height = diameter)
+    r = PROP_DIAMETER / 2
+    h = PROP_DIAMETER
 
-    pos  = propeller_positions[:3]    # (3, 3) positive-y motors
-    ornt = propeller_orientations[:3] # (3, 3) thrust unit vectors
+    ornt = propeller_orientations / jnp.maximum(
+        jnp.linalg.norm(propeller_orientations, axis=1, keepdims=True), 1e-8
+    )
+    tips = propeller_positions - h * ornt  # (6, 3)
 
-    ornt = ornt / jnp.maximum(jnp.linalg.norm(ornt, axis=1, keepdims=True), 1e-8)
-    tips = pos - h * ornt  # (3, 3)  downwash end of each capsule
-
-    pairs = [(0, 1), (0, 2), (1, 2)]
+    pairs = [(i, j) for i in range(6) for j in range(6) if i != j]
     loss = jnp.zeros(())
     for i, j in pairs:
-        dist = _seg_to_seg_dist(pos[i], tips[i], pos[j], tips[j])
-        penetration = jnp.maximum(0.0, 2.0 * r - dist)  # sum of radii = 2r
+        dist = _point_to_seg_dist(propeller_positions[i], propeller_positions[j], tips[j])
+        penetration = jnp.maximum(0.0, 2.0 * r - dist)
         loss = loss + penetration ** 2
 
     return weight * loss
@@ -199,7 +184,6 @@ def propeller_collision_loss(propeller_positions, propeller_orientations, weight
 def propeller_collision_loss_from_params(l, phi, alpha, weight=100.0):
     """
     Compute propeller collision loss directly from morphology parameters.
-    Replicates the geometry computation from morphology() for the positive-y arms.
 
     Args:
         l:      (3,) arm lengths for positive-y arms
@@ -207,22 +191,23 @@ def propeller_collision_loss_from_params(l, phi, alpha, weight=100.0):
         alpha:  (3,) propeller tilt angles (rad)
         weight: float, loss coefficient
     """
-    azimuths_pos = jnp.array([jnp.pi/6, jnp.pi*3/6, jnp.pi*5/6])  # positive-y only
+    l_full     = jnp.array([l[0],     l[1],     l[2],     l[2],     l[1],     l[0]])
+    phi_full   = jnp.array([phi[0],   phi[1],   phi[2],   phi[2],   phi[1],   phi[0]])
+    alpha_full = jnp.array([alpha[0], alpha[1], alpha[2], -alpha[2], -alpha[1], -alpha[0]])
 
-    cp = jnp.cos(phi)
-    sp = jnp.sin(phi)
-    propeller_positions = l[:, None] * jnp.stack(
-        [cp * jnp.cos(azimuths_pos), cp * jnp.sin(azimuths_pos), -sp], axis=1
-    )  # (3, 3)
+    azimuths = jnp.array([jnp.pi/6, jnp.pi*3/6, jnp.pi*5/6,
+                           jnp.pi*7/6, jnp.pi*9/6, jnp.pi*11/6])
+
+    cp = jnp.cos(phi_full)
+    sp = jnp.sin(phi_full)
+    propeller_positions = l_full[:, None] * jnp.stack(
+        [cp * jnp.cos(azimuths), cp * jnp.sin(azimuths), -sp], axis=1
+    )  # (6, 3)
 
     arm_norms = jnp.linalg.norm(propeller_positions, axis=1, keepdims=True)
     arm_unit  = propeller_positions / jnp.maximum(arm_norms, 1e-8)
 
-    thrust_base = jnp.tile(jnp.array([0.0, 0.0, -1.0]), (3, 1))
-    propeller_orientations = _rodrigues(thrust_base, arm_unit, alpha)  # (3, 3)
+    thrust_base = jnp.tile(jnp.array([0.0, 0.0, -1.0]), (6, 1))
+    propeller_orientations = _rodrigues(thrust_base, arm_unit, alpha_full)  # (6, 3)
 
-    # Pad to (6, 3) shape expected by propeller_collision_loss (only [:3] is used)
-    pos_pad  = jnp.concatenate([propeller_positions, jnp.zeros((3, 3))], axis=0)
-    ornt_pad = jnp.concatenate([propeller_orientations, jnp.zeros((3, 3))], axis=0)
-
-    return propeller_collision_loss(pos_pad, ornt_pad, weight=weight)
+    return propeller_collision_loss(propeller_positions, propeller_orientations, weight=weight)

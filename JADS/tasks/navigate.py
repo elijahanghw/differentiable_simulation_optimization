@@ -71,7 +71,7 @@ class Navigate:
 
     # ---- Morphology --------------------------------------------------------
     l_min: float = 0.10;  l_max: float = 0.20;  l_default: float = 0.15
-    phi_min:   float = -jnp.pi / 6; phi_max:   float =  jnp.pi / 6; phi_default:   float = 0.0
+    phi_min:   float = -jnp.pi / 4; phi_max:   float =  jnp.pi / 4; phi_default:   float = 0.0
     alpha_min: float = -jnp.pi / 2; alpha_max: float =  jnp.pi / 2; alpha_default: float = 0.0
     alternating_alpha: bool = False
     train_morphology:  bool = False
