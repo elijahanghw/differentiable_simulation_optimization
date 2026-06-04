@@ -20,7 +20,7 @@ import yaml
 
 from JADS.tasks import make_env
 from JADS.drone_physics.quat_math import quat_to_rotmat, quat_to_euler
-from JADS.drone_physics.morphology import PROP_DIAMETER
+from JADS.drone_physics.morphology import PROP_DIAMETER, MOUNT_RADIUS
 from JADS.models import make_model
 from JADS.utils.checkpoint import load as load_checkpoint
 
@@ -55,8 +55,8 @@ def _disc_points(normal, radius, n_pts=32):
     return radius * (np.cos(angles)[:, None] * u + np.sin(angles)[:, None] * v)
 
 
-def _build_drone_geometry(l, phi, alpha):
-    """Propeller positions and disc offsets in FRD body frame."""
+def _build_drone_geometry(l, phi, alpha, mount_radius=MOUNT_RADIUS):
+    """Propeller positions, mount points, and disc offsets in FRD body frame."""
     l = np.asarray(l).flatten()
     l_full = np.array([l[0], l[1], l[2], l[2], l[1], l[0]]) if l.size == 3 else np.broadcast_to(l, (6,)).copy()
 
@@ -67,32 +67,51 @@ def _build_drone_geometry(l, phi, alpha):
     alpha_full = np.array([alpha[0], alpha[1], alpha[2], -alpha[2], -alpha[1], -alpha[0]])
 
     azimuths = np.array([np.pi/6, np.pi*3/6, np.pi*5/6, np.pi*7/6, np.pi*9/6, np.pi*11/6])
+
+    mount_points = mount_radius * np.stack(
+        [np.cos(azimuths), np.sin(azimuths), np.zeros_like(azimuths)], axis=1
+    )  # (6, 3)
+
     cp = np.cos(phi_full);  sp = np.sin(phi_full)
-    prop_pos_body = l_full[:, None] * np.stack(
+    arm_unit = np.stack(
         [cp * np.cos(azimuths), cp * np.sin(azimuths), -sp], axis=1
     )  # (6, 3)
 
-    arm_unit    = prop_pos_body / np.maximum(np.linalg.norm(prop_pos_body, axis=1, keepdims=True), 1e-8)
-    thrust_body = _rodrigues_np(np.tile(np.array([0.0, 0.0, -1.0]), (6, 1)), arm_unit, alpha_full)
+    prop_pos_body = mount_points + l_full[:, None] * arm_unit  # (6, 3)
+
+    thrust_base   = np.tile(np.array([0.0, 0.0, -1.0]), (6, 1))
+    tangential    = np.stack([-np.sin(azimuths), np.cos(azimuths), np.zeros_like(azimuths)], axis=1)
+    thrust_pitched = _rodrigues_np(thrust_base, tangential, phi_full)
+    thrust_body    = _rodrigues_np(thrust_pitched, arm_unit, alpha_full)
+
     disc_offsets = np.stack([_disc_points(thrust_body[i], PROP_DIAMETER / 2) for i in range(6)])
 
-    return prop_pos_body, disc_offsets  # (6,3), (6, n_pts, 3)
+    return prop_pos_body, mount_points, disc_offsets  # (6,3), (6,3), (6, n_pts, 3)
 
 
-def _log_drone(t, state, prop_pos_body, disc_offsets, dt):
+def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, dt):
     rr.set_time("time", duration=t * dt)
 
     pos  = state[0:3]
     quat = state[6:10]
     R    = np.array(quat_to_rotmat(quat))
 
-    prop_world = pos + (R @ prop_pos_body.T).T  # (6, 3)
+    prop_world  = pos + (R @ prop_pos_body.T).T    # (6, 3)
+    mount_world = pos + (R @ mount_points_body.T).T  # (6, 3)
 
     rr.log("drone/arms", rr.LineStrips3D(
-        [np.stack([pos, prop_world[i]]) for i in range(6)],
+        [np.stack([mount_world[i], prop_world[i]]) for i in range(6)],
         colors=[[80, 80, 220]], radii=0.004,
     ))
-    rr.log("drone/body",  rr.Points3D([pos],       colors=[[220, 80,  80]], radii=0.04))
+    body_z_world = R[:, 2]
+    rr.log("drone/body", rr.Cylinders3D(
+        centers=[pos],
+        lengths=[0.05],
+        radii=[0.05],
+        quaternions=_quat_z_to_axis([body_z_world]),
+        colors=[[220, 80, 80, 200]],
+        fill_mode="solid",
+    ))
     rr.log("drone/props", rr.Points3D(prop_world,  colors=[[80,  180, 80]], radii=0.01))
     rr.log("drone/discs", rr.LineStrips3D([
         np.concatenate([
@@ -248,7 +267,7 @@ def main():
     states, vis_depths = run_rollout(env, policy, policy_params, morph_params, key, steps)
     print(f"  {len(states)} steps collected")
 
-    prop_pos_body, disc_offsets = _build_drone_geometry(l, phi, alpha)
+    prop_pos_body, mount_points_body, disc_offsets = _build_drone_geometry(l, phi, alpha)
 
     rr.init(f"{ecfg['name']}_rollout")
     rr.log("/", rr.ViewCoordinates.FRD, static=True)
@@ -266,7 +285,7 @@ def main():
 
     print("Logging to Rerun…")
     for t, state in enumerate(states):
-        _log_drone(t, state, prop_pos_body, disc_offsets, env.dt)
+        _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, env.dt)
 
         if vis_depths is not None:
             rr.set_time("time", duration=t * env.dt)

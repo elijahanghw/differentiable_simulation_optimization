@@ -6,7 +6,7 @@ arena_y_max:  3.0
 arena_z_min: -1.0
 arena_z_max: 0.0
 
-n_boxes:    30
+n_boxes:    25
 
 box_hx_min: 0.10
 box_hx_max: 0.20
