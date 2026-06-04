@@ -22,7 +22,8 @@ MAX_RPM = 3200 # rad/s
 
 KT = 4.00e-07
 KM = 4.00e-09
-PROP_DIAMETER = 0.0762 + 0.02 # 3 inch propeller = 0.0762 m + 0.02 m tolerance
+PROP_DIAMETER = 0.0762 # 3 inch propeller = 0.0762 m + 0.02 m tolerance
+PROP_BUFFER = 0.02
 
 LENGTH = 0.1
 WIDTH = 0.1
@@ -163,8 +164,8 @@ def propeller_collision_loss(propeller_positions, propeller_orientations, weight
     Returns:
         scalar loss
     """
-    r = PROP_DIAMETER / 2
-    h = PROP_DIAMETER
+    r = (PROP_DIAMETER + PROP_BUFFER) / 2
+    h = PROP_DIAMETER + PROP_BUFFER
 
     ornt = propeller_orientations / jnp.maximum(
         jnp.linalg.norm(propeller_orientations, axis=1, keepdims=True), 1e-8
