@@ -2,11 +2,11 @@
 Training entry point.
 
 Loads a YAML config, applies any CLI overrides, and dispatches to the
-algorithm specified by config["training"]["algo"] (default: "apg").
+algorithm specified by config["training"]["algo"] (default: "bptt").
 
 Supported algorithms
 --------------------
-  apg  — algos/apg.py   Analytic Policy Gradient (differentiable simulation)
+  bptt — algos/bptt.py  Backpropagation Through Time (differentiable simulation)
   ppo  — algos/ppo.py   Proximal Policy Optimization
 
 Usage
@@ -89,7 +89,7 @@ if __name__ == "__main__":
         config["training"]["seed"] = int.from_bytes(os.urandom(4), "big")
     print(f"Seed         : {config['training']['seed']}")
 
-    algo = config["training"].get("algo", "apg").lower()
+    algo = config["training"].get("algo", "bptt").lower()
     if algo not in ALGO_REGISTRY:
         print(f"Unknown algo '{algo}'. Choose from: {list(ALGO_REGISTRY)}", file=sys.stderr)
         sys.exit(1)

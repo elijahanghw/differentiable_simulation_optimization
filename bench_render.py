@@ -79,7 +79,7 @@ def main():
     print(f"[dist fwd] _get_nearest_obstacle_dist (batch={args.batch}): {ms_dist_fwd:.2f} ms/call")
 
     # ------------------------------------------------------------------
-    # 3. Distance gradient  (backward — this is what APG backprops through)
+    # 3. Distance gradient  (backward — this is what BPTT backprops through)
     # ------------------------------------------------------------------
     def dist_loss(states):
         dists = jax.vmap(env._get_nearest_obstacle_dist)(states)

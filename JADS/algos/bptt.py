@@ -1,5 +1,5 @@
 """
-Analytic Policy Gradient (APG).
+Backpropagation Through Time (BPTT).
 
 Backpropagates gradients through differentiable simulation dynamics using
 jax.value_and_grad.  Supports joint morphology optimisation when the
@@ -74,7 +74,7 @@ def _build_loss_fn(env, policy, horizon: int):
 
 def _build_loss_fn_pointmass(env, policy, horizon: int):
     """
-    DiffPhysDrone-style APG loss for PointMassNavigate.
+    DiffPhysDrone-style BPTT loss for PointMassNavigate.
 
     The policy outputs 6-D raw actions in body frame.  The caller rotates
     [:3] → a_pred and [3:] → v_pred to world frame before env.step().
@@ -123,7 +123,7 @@ def _build_loss_fn_pointmass(env, policy, horizon: int):
 
 def _build_loss_fn_multicopter_traj(env, policy, horizon: int):
     """
-    Trajectory-based APG loss for multicopter Navigate.
+    Trajectory-based BPTT loss for multicopter Navigate.
 
     Collects the full rollout via jax.lax.scan, then calls env.compute_loss()
     once on the accumulated trajectory — matching the PointMassNavigate pattern
@@ -380,7 +380,7 @@ def train(config: Dict[str, Any]) -> Any:
 
     # -- Info ---------------------------------------------------------------
     n_params = sum(x.size for x in jax.tree_util.tree_leaves(policy_params))
-    print(f"Algo         : APG")
+    print(f"Algo         : BPTT")
     print(f"Devices      : {jax.devices()}")
     print(f"Env          : {ecfg['name']}  |  obs_dim={env.obs_dim}  act_dim={env.act_dim}")
     print(f"Morphology   : {'yes' if has_morph else 'no'}")

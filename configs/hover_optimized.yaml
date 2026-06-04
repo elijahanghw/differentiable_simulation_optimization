@@ -32,7 +32,7 @@ training:
   morph_epochs: 2000
   morphological_loss: true
   morphological_loss_weight: 500.0
-  horizon: 200        # rollout length for BPTT (short-horizon APG)
+  horizon: 200        # rollout length for BPTT
   batch_size: 1024    # number of parallel rollouts per gradient step
   lr: 3.0e-4
   lr_min: 3.0e-4

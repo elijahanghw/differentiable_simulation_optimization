@@ -1,5 +1,5 @@
-from .apg import train as train_apg
+from .bptt import train as train_bptt
 
 ALGO_REGISTRY = {
-    "apg": train_apg,
+    "bptt": train_bptt,
 }
