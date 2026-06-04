@@ -39,7 +39,9 @@ env:
 
   # ---- Scene (random obstacles) -----------------------------------------
   # Path to a scene YAML in scene/ — or replace with an inline dict.
-  scene: scene/obstacles_dense.yaml
+  # scene: scene/obstacles_dense.yaml
+  scene: scene/columns.yaml
+
 
 # -----------------------------------------------------------------------
 # Policy
@@ -86,5 +88,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_morph_logs.csv
-  checkpoint_path: checkpoints/navigate_morph.pkl
+  csv_path: logs/navigate_morph_test_logs.csv
+  checkpoint_path: checkpoints/navigate_morph_test.pkl
