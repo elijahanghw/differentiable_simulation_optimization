@@ -144,20 +144,34 @@ class Hover:
         next_state = next_state.at[3:6].set(jnp.clip(next_state[3:6],   -20.0, 20.0))
         next_state = next_state.at[10:13].set(jnp.clip(next_state[10:13], -20.0, 20.0))
 
-        pos   = next_state[0:3]
-        vel   = next_state[3:6]
-        euler = quat_to_euler(next_quat)
-        omega = next_state[10:13]
+        step_data = {
+            "pos":    next_state[0:3],
+            "vel":    next_state[3:6],
+            "omega":  next_state[10:13],
+            "action": U,
+        }
+        return next_state, self._get_obs(next_state), step_data
 
-        reward = -(
-            jnp.sum(pos**2)
-            + 0.1 * jnp.sum(vel**2)
-            # + 0.01 * jnp.sum(euler[0:2]**2)
-            + 0.01 * jnp.sum(omega**2)
-            + 0.05 * jnp.sum(((U + 1.0) / 2.0) ** 2)
-        )
+    def compute_loss(self, traj) -> tuple:
+        """
+        Compute loss from a full batched trajectory.
 
-        return next_state, self._get_obs(next_state), reward, jnp.bool_(False), jnp.bool_(False), {}
+        traj: dict of (batch, horizon, ...) arrays.
+        Returns: (total_loss, mean_return)
+        """
+        pos   = traj["pos"]    # (B, T, 3)
+        vel   = traj["vel"]    # (B, T, 3)
+        omega = traj["omega"]  # (B, T, 3)
+        U     = traj["action"] # (B, T, 6)
+
+        per_step = -(
+            jnp.sum(pos ** 2, axis=-1)
+            + 0.1  * jnp.sum(vel   ** 2, axis=-1)
+            + 0.01 * jnp.sum(omega ** 2, axis=-1)
+            + 0.05 * jnp.sum(((U + 1.0) / 2.0) ** 2, axis=-1)
+        )  # (B, T)
+        mean_return = jnp.mean(per_step)
+        return -mean_return, mean_return
 
     # ------------------------------------------------------------------
     # Morphology

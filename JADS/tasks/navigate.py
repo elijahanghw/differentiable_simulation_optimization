@@ -340,7 +340,7 @@ class Navigate:
             "omega":      next_state[10:13],
             "dist":       dist,
         }
-        return next_state, step_data
+        return next_state, self._get_obs(next_state), step_data
 
     def compute_loss(self, traj):
         """
