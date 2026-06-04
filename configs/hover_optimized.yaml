@@ -2,7 +2,7 @@
 # Environment
 # -----------------------------------------------------------------------
 env:
-  name: hover_3d
+  name: hover
   integrator: semi_implicit_euler
   train_morphology: true
   morph_init_scale: 0.0

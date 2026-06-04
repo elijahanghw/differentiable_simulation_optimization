@@ -2,7 +2,7 @@
 # Fixed drone with alternating alpha (no morphology optimisation)
 # -----------------------------------------------------------------------
 env:
-  name: hover_3d
+  name: hover
   integrator: semi_implicit_euler
   train_morphology: false
   alternating_alpha: true

@@ -1,0 +1,288 @@
+"""
+Task-agnostic Rerun rollout visualizer for JADS environments.
+
+Works for both Hover and Navigate. Navigate-specific elements (target, obstacles,
+depth images, collision distance) are logged automatically when the environment
+exposes them. Uses FRD coordinates throughout (matches the simulation frame).
+
+Usage:
+  python rerun_rollout.py --config configs/hover.yaml   --checkpoint checkpoints/hover.pkl
+  python rerun_rollout.py --config configs/navigate.yaml --checkpoint checkpoints/navigate.pkl
+"""
+
+import argparse
+import random
+
+import jax
+import numpy as np
+import rerun as rr
+import yaml
+
+from JADS.tasks import make_env
+from JADS.drone_physics.quat_math import quat_to_rotmat, quat_to_euler
+from JADS.drone_physics.morphology import PROP_DIAMETER
+from JADS.models import make_model
+from JADS.utils.checkpoint import load as load_checkpoint
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config",     required=True)
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--steps",      type=int, default=None)
+    p.add_argument("--seed",       type=int, default=None)
+    p.add_argument("--output",     type=str, default="rollout.rrd")
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Drone geometry helpers
+# ---------------------------------------------------------------------------
+
+def _rodrigues_np(v, axis, angle):
+    c   = np.cos(angle)[..., None]
+    s   = np.sin(angle)[..., None]
+    dot = np.sum(axis * v, axis=-1, keepdims=True)
+    return v * c + np.cross(axis, v) * s + axis * dot * (1.0 - c)
+
+
+def _disc_points(normal, radius, n_pts=32):
+    n   = normal / np.linalg.norm(normal)
+    ref = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u   = np.cross(n, ref);  u /= np.linalg.norm(u)
+    v   = np.cross(n, u)
+    angles = np.linspace(0.0, 2.0 * np.pi, n_pts, endpoint=False)
+    return radius * (np.cos(angles)[:, None] * u + np.sin(angles)[:, None] * v)
+
+
+def _build_drone_geometry(l, phi, alpha):
+    """Propeller positions and disc offsets in FRD body frame."""
+    l = np.asarray(l).flatten()
+    l_full = np.array([l[0], l[1], l[2], l[2], l[1], l[0]]) if l.size == 3 else np.broadcast_to(l, (6,)).copy()
+
+    phi = np.asarray(phi).flatten()
+    phi_full = np.array([phi[0], phi[1], phi[2], phi[2], phi[1], phi[0]]) if phi.size == 3 else np.broadcast_to(phi, (6,)).copy()
+
+    alpha = np.asarray(alpha).flatten()
+    alpha_full = np.array([alpha[0], alpha[1], alpha[2], -alpha[2], -alpha[1], -alpha[0]])
+
+    azimuths = np.array([np.pi/6, np.pi*3/6, np.pi*5/6, np.pi*7/6, np.pi*9/6, np.pi*11/6])
+    cp = np.cos(phi_full);  sp = np.sin(phi_full)
+    prop_pos_body = l_full[:, None] * np.stack(
+        [cp * np.cos(azimuths), cp * np.sin(azimuths), -sp], axis=1
+    )  # (6, 3)
+
+    arm_unit    = prop_pos_body / np.maximum(np.linalg.norm(prop_pos_body, axis=1, keepdims=True), 1e-8)
+    thrust_body = _rodrigues_np(np.tile(np.array([0.0, 0.0, -1.0]), (6, 1)), arm_unit, alpha_full)
+    disc_offsets = np.stack([_disc_points(thrust_body[i], PROP_DIAMETER / 2) for i in range(6)])
+
+    return prop_pos_body, disc_offsets  # (6,3), (6, n_pts, 3)
+
+
+def _log_drone(t, state, prop_pos_body, disc_offsets, dt):
+    rr.set_time("time", duration=t * dt)
+
+    pos  = state[0:3]
+    quat = state[6:10]
+    R    = np.array(quat_to_rotmat(quat))
+
+    prop_world = pos + (R @ prop_pos_body.T).T  # (6, 3)
+
+    rr.log("drone/arms", rr.LineStrips3D(
+        [np.stack([pos, prop_world[i]]) for i in range(6)],
+        colors=[[80, 80, 220]], radii=0.004,
+    ))
+    rr.log("drone/body",  rr.Points3D([pos],       colors=[[220, 80,  80]], radii=0.04))
+    rr.log("drone/props", rr.Points3D(prop_world,  colors=[[80,  180, 80]], radii=0.01))
+    rr.log("drone/discs", rr.LineStrips3D([
+        np.concatenate([
+            prop_world[i] + (R @ disc_offsets[i].T).T,
+            prop_world[i] + disc_offsets[i, :1] @ R.T,
+        ], axis=0)
+        for i in range(6)
+    ], colors=[[80, 220, 80]], radii=0.003))
+
+    roll, pitch, yaw = quat_to_euler(quat)
+    for name, val in [
+        ("x",  state[0]),  ("y",     state[1]),  ("z",    state[2]),
+        ("vx", state[3]),  ("vy",    state[4]),  ("vz",   state[5]),
+        ("roll", roll),    ("pitch", pitch),     ("yaw",  yaw),
+        ("wx", state[10]), ("wy",    state[11]), ("wz",   state[12]),
+    ]:
+        rr.log(f"state/{name}", rr.Scalars(float(val)))
+
+
+# ---------------------------------------------------------------------------
+# Navigate-specific: scene geometry
+# ---------------------------------------------------------------------------
+
+def _quat_z_to_axis(axes):
+    src = np.array([0.0, 0.0, 1.0])
+    quats = []
+    for ax in axes:
+        ax = ax / (np.linalg.norm(ax) + 1e-8)
+        d  = float(np.dot(src, ax))
+        if d > 1.0 - 1e-6:
+            quats.append([0.0, 0.0, 0.0, 1.0])
+        elif d < -1.0 + 1e-6:
+            quats.append([1.0, 0.0, 0.0, 0.0])
+        else:
+            rot_axis  = np.cross(src, ax);  rot_axis /= np.linalg.norm(rot_axis)
+            half      = np.arccos(np.clip(d, -1.0, 1.0)) / 2.0
+            s         = np.sin(half)
+            quats.append([rot_axis[0]*s, rot_axis[1]*s, rot_axis[2]*s, np.cos(half)])
+    return np.array(quats, dtype=np.float32)
+
+
+def _log_scene(scene_cfg, scene_array):
+    arrays = scene_cfg.unpack(scene_array)
+
+    cx = (scene_cfg.arena_x_min + scene_cfg.arena_x_max) / 2
+    cy = (scene_cfg.arena_y_min + scene_cfg.arena_y_max) / 2
+    hx = (scene_cfg.arena_x_max - scene_cfg.arena_x_min) / 2 + 2.0
+    hy = (scene_cfg.arena_y_max - scene_cfg.arena_y_min) / 2 + 2.0
+    rr.log("world/ground", rr.Boxes3D(
+        centers=[[cx, cy, 0.02]], half_sizes=[[hx, hy, 0.02]],
+        colors=[[130, 130, 130, 255]], fill_mode="solid",
+    ), static=True)
+
+    sc = np.array(arrays["sphere_centers"]);  sr = np.array(arrays["sphere_radii"])
+    if sc.shape[0] > 0:
+        rr.log("world/spheres", rr.Ellipsoids3D(
+            centers=sc, half_sizes=np.stack([sr, sr, sr], axis=1),
+            colors=[[220, 100, 60, 200]], fill_mode="solid",
+        ), static=True)
+
+    bc  = np.array(arrays["box_centers"]);  bhe = np.array(arrays["box_half_extents"])
+    if bc.shape[0] > 0:
+        rr.log("world/boxes", rr.Boxes3D(
+            centers=bc, half_sizes=bhe, colors=[[60, 100, 220, 200]], fill_mode="solid",
+        ), static=True)
+
+    cc  = np.array(arrays["cylinder_centers"]);  ca  = np.array(arrays["cylinder_axes"])
+    chh = np.array(arrays["cylinder_hh"]);       cr  = np.array(arrays["cylinder_radii"])
+    if cc.shape[0] > 0:
+        rr.log("world/capsules", rr.Capsules3D(
+            lengths=(2.0 * chh).astype(np.float32), radii=cr.astype(np.float32),
+            translations=cc - ca * chh[:, None], quaternions=_quat_z_to_axis(ca),
+            colors=[[60, 200, 100, 200]], fill_mode="solid",
+        ), static=True)
+
+
+# ---------------------------------------------------------------------------
+# Rollout
+# ---------------------------------------------------------------------------
+
+def run_rollout(env, policy, policy_params, morph_params, key, steps):
+    has_hidden    = hasattr(policy, "init_hidden")
+    has_depth     = hasattr(policy, "conv_features")
+    has_vis_depth = hasattr(env, "get_vis_depth")
+
+    obs, state, _ = env.reset(key)
+    states     = [np.array(state)]
+    vis_depths = [np.array(env.get_vis_depth(state))] if has_vis_depth else None
+
+    hidden = policy.init_hidden() if has_hidden else None
+
+    for _ in range(steps):
+        if has_hidden:
+            if has_depth:
+                depth_img, obs_vec = obs
+                action, hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+            else:
+                action, hidden = policy.apply({"params": policy_params}, obs, hidden)
+        else:
+            action = policy.apply({"params": policy_params}, obs)
+
+        state, obs, _ = env.step(state, action, morph_params)
+        states.append(np.array(state))
+        if has_vis_depth:
+            vis_depths.append(np.array(env.get_vis_depth(state)))
+
+    return np.stack(states), vis_depths
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    args = parse_args()
+
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
+
+    ecfg       = config["env"]
+    env_kwargs = {k: v for k, v in ecfg.items() if k != "name"}
+    if "depth_camera" in config:
+        env_kwargs["depth_camera"] = config["depth_camera"]
+    env    = make_env(ecfg["name"], **env_kwargs)
+    pcfg   = config["policy"]
+    policy = make_model(pcfg["type"], pcfg, env.obs_dim, env.act_dim)
+
+    policy_params, morph_params = load_checkpoint(args.checkpoint)
+
+    if morph_params is not None and hasattr(env, "get_morph_info"):
+        print("Morphology:")
+        for k, v in env.get_morph_info(morph_params).items():
+            print(f"  {k} = {v:.4f}")
+
+    if morph_params is not None and hasattr(env, "get_l"):
+        l     = np.array(env.get_l(morph_params))
+        phi   = np.array(env.get_phi(morph_params))
+        alpha = np.array(env.get_alpha(morph_params))
+    else:
+        l     = np.full(3, env.l_default)
+        phi   = np.full(3, env.phi_default)
+        alpha = (
+            np.array([env.alpha_default, -env.alpha_default, env.alpha_default])
+            if env.alternating_alpha else np.full(3, env.alpha_default)
+        )
+
+    steps = args.steps if args.steps is not None else config["training"]["horizon"]
+
+    seed = args.seed if args.seed is not None else random.randint(0, 2**31)
+    print(f"Seed: {seed}")
+    key = jax.random.PRNGKey(seed)
+    print("Running rollout…")
+    states, vis_depths = run_rollout(env, policy, policy_params, morph_params, key, steps)
+    print(f"  {len(states)} steps collected")
+
+    prop_pos_body, disc_offsets = _build_drone_geometry(l, phi, alpha)
+
+    rr.init(f"{ecfg['name']}_rollout")
+    rr.log("/", rr.ViewCoordinates.FRD, static=True)
+
+    if hasattr(env, "scene_cfg"):
+        _log_scene(env.scene_cfg, states[0][22:])
+        rr.log("world/target", rr.Points3D(
+            [states[0][19:22]], colors=[[255, 215, 0]], radii=0.15,
+        ), static=True)
+
+    rr.set_time("time", duration=len(states) * env.dt)
+    rr.log("world/trajectory", rr.LineStrips3D(
+        [states[:, 0:3]], colors=[[160, 210, 255]], radii=0.008,
+    ))
+
+    print("Logging to Rerun…")
+    for t, state in enumerate(states):
+        _log_drone(t, state, prop_pos_body, disc_offsets, env.dt)
+
+        if vis_depths is not None:
+            rr.set_time("time", duration=t * env.dt)
+            rr.log("drone/depth", rr.Image(
+                np.clip(vis_depths[t] / env.cam_max_range, 0.0, 1.0).astype(np.float32)
+            ))
+
+        if hasattr(env, "scene_cfg"):
+            rr.set_time("time", duration=t * env.dt)
+            rr.log("state/dist_to_target", rr.Scalars(
+                float(np.linalg.norm(state[0:3] - state[19:22]))
+            ))
+
+    rr.save(args.output)
+    print(f"Saved → {args.output}  (open with: rerun {args.output})")
+
+
+if __name__ == "__main__":
+    main()
