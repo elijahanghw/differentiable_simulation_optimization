@@ -55,7 +55,7 @@ def _disc_points(normal, radius, n_pts=32):
     return radius * (np.cos(angles)[:, None] * u + np.sin(angles)[:, None] * v)
 
 
-def _build_drone_geometry(l, theta, phi, mount_radius=MOUNT_RADIUS):
+def _build_drone_geometry(l, theta, phi, alpha, mount_radius=MOUNT_RADIUS):
     """Propeller positions, mount points, and disc offsets in FRD body frame."""
     l = np.asarray(l).flatten()
     l_full = np.array([l[0], l[1], l[2], l[2], l[1], l[0]]) if l.size == 3 else np.broadcast_to(l, (6,)).copy()
@@ -65,6 +65,9 @@ def _build_drone_geometry(l, theta, phi, mount_radius=MOUNT_RADIUS):
 
     phi = np.asarray(phi).flatten()
     phi_full = np.array([phi[0], phi[1], phi[2], -phi[2], -phi[1], -phi[0]])
+
+    alpha = np.asarray(alpha).flatten()
+    alpha_full = np.array([alpha[0], alpha[1], alpha[2], alpha[2], alpha[1], alpha[0]])
 
     azimuths = np.array([np.pi/6, np.pi*3/6, np.pi*5/6, np.pi*7/6, np.pi*9/6, np.pi*11/6])
 
@@ -81,15 +84,15 @@ def _build_drone_geometry(l, theta, phi, mount_radius=MOUNT_RADIUS):
 
     thrust_base   = np.tile(np.array([0.0, 0.0, -1.0]), (6, 1))
     tangential    = np.stack([-np.sin(azimuths), np.cos(azimuths), np.zeros_like(azimuths)], axis=1)
-    thrust_pitched = _rodrigues_np(thrust_base, tangential, theta_full)
+    thrust_pitched = _rodrigues_np(thrust_base, tangential, theta_full - alpha_full)
     thrust_body    = _rodrigues_np(thrust_pitched, arm_unit, phi_full)
 
     disc_offsets = np.stack([_disc_points(thrust_body[i], PROP_DIAMETER / 2) for i in range(6)])
 
-    return prop_pos_body, mount_points, disc_offsets  # (6,3), (6,3), (6, n_pts, 3)
+    return prop_pos_body, mount_points, disc_offsets, thrust_body  # (6,3), (6,3), (6,n_pts,3), (6,3)
 
 
-def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, dt):
+def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_body, dt):
     rr.set_time("time", duration=t * dt)
 
     pos  = state[0:3]
@@ -120,6 +123,13 @@ def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, dt):
         ], axis=0)
         for i in range(6)
     ], colors=[[80, 220, 80]], radii=0.003))
+    thrust_world = (R @ thrust_body.T).T  # (6, 3) — unit thrust vectors in world frame
+    rr.log("drone/thrust", rr.Arrows3D(
+        origins=prop_world,
+        vectors=thrust_world * 0.08,
+        colors=[[255, 200, 0]],
+        radii=0.004,
+    ))
 
     roll, pitch, yaw = quat_to_euler(quat)
     for name, val in [
@@ -250,6 +260,7 @@ def main():
         l     = np.array(env.get_l(morph_params))
         theta = np.array(env.get_theta(morph_params))
         phi   = np.array(env.get_phi(morph_params))
+        alpha = np.array(env.get_alpha(morph_params))
     else:
         l     = np.full(3, env.l_default)
         theta = np.full(3, env.theta_default)
@@ -257,6 +268,7 @@ def main():
             np.array([env.phi_default, -env.phi_default, env.phi_default])
             if env.alternating_phi else np.full(3, env.phi_default)
         )
+        alpha = np.full(3, env.alpha_default)
 
     steps = args.steps if args.steps is not None else config["training"]["horizon"]
 
@@ -267,7 +279,7 @@ def main():
     states, vis_depths = run_rollout(env, policy, policy_params, morph_params, key, steps)
     print(f"  {len(states)} steps collected")
 
-    prop_pos_body, mount_points_body, disc_offsets = _build_drone_geometry(l, theta, phi)
+    prop_pos_body, mount_points_body, disc_offsets, thrust_body = _build_drone_geometry(l, theta, phi, alpha)
 
     rr.init(f"{ecfg['name']}_rollout")
     rr.log("/", rr.ViewCoordinates.FRD, static=True)
@@ -285,7 +297,7 @@ def main():
 
     print("Logging to Rerun…")
     for t, state in enumerate(states):
-        _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, env.dt)
+        _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_body, env.dt)
 
         if vis_depths is not None:
             rr.set_time("time", duration=t * env.dt)

@@ -59,7 +59,7 @@ def _rodrigues(v, axis, angle):
 MOUNT_RADIUS = 0.05  # distance from body center to arm mounting point (m)
 
 
-def morphology(l, theta=None, phi=None, mount_radius=MOUNT_RADIUS):
+def morphology(l, theta=None, phi=None, alpha=None, mount_radius=MOUNT_RADIUS):
     """
     mount_radius: scalar — distance from body center to arm mounting point (m).
     l:     scalar or (3,) array [l1, l2, l3] — arm lengths from the mounting point
@@ -87,10 +87,17 @@ def morphology(l, theta=None, phi=None, mount_radius=MOUNT_RADIUS):
     if phi.shape == (1,):
         phi = jnp.broadcast_to(phi, (3,))
 
+    if alpha is None:
+        alpha = jnp.zeros(3)
+    alpha = jnp.atleast_1d(jnp.asarray(alpha, dtype=jnp.float32))
+    if alpha.shape == (1,):
+        alpha = jnp.broadcast_to(alpha, (3,))
+
     # Mirror to full 6 arms: positive-y then negative-y
     l_full     = jnp.array([l[0],     l[1],     l[2],     l[2],     l[1],     l[0]])     # (6,)
     theta_full = jnp.array([theta[0], theta[1], theta[2], theta[2], theta[1], theta[0]]) # (6,)
     phi_full   = jnp.array([phi[0],   phi[1],   phi[2],   -phi[2],  -phi[1],  -phi[0]])  # (6,)
+    alpha_full = jnp.array([alpha[0], alpha[1], alpha[2], alpha[2], alpha[1], alpha[0]]) # (6,)
 
     azimuths = jnp.array([jnp.pi/6, jnp.pi*3/6, jnp.pi*5/6,
                            jnp.pi*7/6, jnp.pi*9/6, jnp.pi*11/6])              # (6,)
@@ -110,14 +117,19 @@ def morphology(l, theta=None, phi=None, mount_radius=MOUNT_RADIUS):
     # Motor positions: mounting point + l along arm direction
     propeller_positions = mount_points + l_full[:, None] * arm_unit            # (6, 3)
 
-    # Thrust direction: start from [0,0,-1], pitch with the arm by theta around the
-    # tangential axis at the mount point, then roll by phi around the arm axis.
+    # Thrust direction: start from [0,0,-1],
     thrust_base = jnp.tile(jnp.array([0.0, 0.0, -1.0]), (6, 1))              # (6, 3)
+
+    # 1. Pitch with the arm by theta around the tangential axis at the mount point
+    # 2. Further pitch thrust by alpha (theta and alpha positive opposite direction) 
+    # Final pitching angle = theta - alpha
     # Tangential axis = [-sin(az), cos(az), 0] — perpendicular to radial, in xy-plane
     tangential = jnp.stack(
         [-jnp.sin(azimuths), jnp.cos(azimuths), jnp.zeros_like(azimuths)], axis=1
     )  # (6, 3)
-    thrust_pitched = _rodrigues(thrust_base, tangential, theta_full)          # (6, 3)
+    thrust_pitched = _rodrigues(thrust_base, tangential, (theta_full - alpha_full))          # (6, 3)
+
+    # 3. Roll by phi around the arm axis.
     propeller_orientations = _rodrigues(thrust_pitched, arm_unit, phi_full)   # (6, 3)
 
     propeller_rotations = jnp.array([1, -1, 1, -1, 1, -1])
@@ -199,7 +211,7 @@ def propeller_collision_loss(propeller_positions, propeller_orientations, weight
     return weight * loss
 
 
-def propeller_collision_loss_from_params(l, theta, phi, mount_radius=MOUNT_RADIUS, weight=100.0):
+def propeller_collision_loss_from_params(l, theta, phi, alpha, mount_radius=MOUNT_RADIUS, weight=100.0):
     """
     Compute propeller collision loss directly from morphology parameters.
 
@@ -207,9 +219,10 @@ def propeller_collision_loss_from_params(l, theta, phi, mount_radius=MOUNT_RADIU
         l:            (3,) arm lengths from mounting point for positive-y arms
         theta:        (3,) vertical tilt angles (rad)
         phi:          (3,) propeller roll tilt angles (rad)
+        alpha:        (3,) motor tilt angles (rad), defaults to 0
         mount_radius: scalar, distance from body center to arm mounting point (m)
         weight:       float, loss coefficient
     """
-    Bf, Bm, m, J, J_inv, propeller_positions = morphology(l, theta, phi, mount_radius)
+    Bf, Bm, m, J, J_inv, propeller_positions = morphology(l, theta, phi, alpha, mount_radius)
     propeller_orientations = (Bf / (KT * MAX_RPM * MAX_RPM)).T               # (6, 3)
     return propeller_collision_loss(propeller_positions, propeller_orientations, weight=weight)

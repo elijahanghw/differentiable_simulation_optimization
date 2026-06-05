@@ -26,6 +26,10 @@ class Hover:
     phi_default: float = 0.0
     alternating_phi: bool = True  # [+a, -a, +a] pattern for positive-y arms → full [+a,-a,+a,-a,+a,-a]
 
+    alpha_min: float = 0.0;         
+    alpha_max: float = jnp.pi / 2;  
+    alpha_default: float = 0.0
+
     train_morphology: bool = True
     morph_init_scale: float = 0.0  # std of Normal noise added to raw pre-sigmoid values; 0 = deterministic
     integrator: str = "rk4"
@@ -118,9 +122,10 @@ class Hover:
 
     def step(self, state: jnp.ndarray, action: jnp.ndarray, morph_params: dict = None) -> tuple:
         if self.train_morphology and morph_params is not None:
-            l     = self.l_min     + (self.l_max     - self.l_min)     * jax.nn.sigmoid(morph_params["l_raw"])     # (3,)
-            theta = self.theta_min + (self.theta_max - self.theta_min) * jax.nn.sigmoid(morph_params["theta_raw"]) # (3,)
-            phi   = self.phi_min   + (self.phi_max   - self.phi_min)   * jax.nn.sigmoid(morph_params["phi_raw"])   # (3,)
+            l = self.get_l(morph_params)
+            theta = self.get_theta(morph_params)
+            phi = self.get_phi(morph_params)
+            alpha = self.get_alpha(morph_params)
         else:
             l     = jnp.full(3, self.l_default)
             theta = jnp.full(3, self.theta_default)
@@ -128,8 +133,9 @@ class Hover:
                 phi = jnp.array([self.phi_default, -self.phi_default, self.phi_default])
             else:
                 phi = jnp.full(3, self.phi_default)
+            alpha = jnp.full(3, self.alpha_default)
 
-        Bf, Bm, m, J, J_inv, _ = morphology(l, theta, phi)
+        Bf, Bm, m, J, J_inv, _ = morphology(l, theta, phi, alpha)
 
         U = jnp.clip(action, -1.0, 1.0)  # command ∈ [-1, 1], matching W state range
 
@@ -193,13 +199,14 @@ class Hover:
             ])
         else:
             phi_raw = jnp.zeros(3)
-        params = {"l_raw": jnp.zeros(3), "theta_raw": jnp.zeros(3), "phi_raw": phi_raw}
+        params = {"l_raw": jnp.zeros(3), "theta_raw": jnp.zeros(3), "phi_raw": phi_raw, "alpha_raw": jnp.zeros(3)}
         if key is not None and self.morph_init_scale > 0.0:
-            keys = jax.random.split(key, 3)
+            keys = jax.random.split(key, 4)
             params = {
                 "l_raw":     params["l_raw"]     + jax.random.normal(keys[0], (3,)) * self.morph_init_scale,
                 "theta_raw": params["theta_raw"] + jax.random.normal(keys[1], (3,)) * self.morph_init_scale,
                 "phi_raw":   params["phi_raw"]   + jax.random.normal(keys[2], (3,)) * self.morph_init_scale,
+                "alpha_raw": params["alpha_raw"] + jax.random.normal(keys[3], (3,)) * self.morph_init_scale,
             }
         return params
 
@@ -211,13 +218,18 @@ class Hover:
 
     def get_phi(self, morph_params: dict) -> jnp.ndarray:
         return self.phi_min + (self.phi_max - self.phi_min) * jax.nn.sigmoid(morph_params["phi_raw"])
+    
+    def get_alpha(self, morph_params: dict) -> jnp.ndarray:
+        return self.alpha_min + (self.alpha_max - self.alpha_min) * jax.nn.sigmoid(morph_params["alpha_raw"])
 
     def get_morph_info(self, morph_params: dict) -> dict:
         l     = self.get_l(morph_params)
         theta = self.get_theta(morph_params)
         phi   = self.get_phi(morph_params)
+        alpha = self.get_alpha(morph_params)
         return {
             "l1": float(l[0]),         "l2": float(l[1]),         "l3": float(l[2]),
             "theta1": float(theta[0]), "theta2": float(theta[1]), "theta3": float(theta[2]),
             "phi1": float(phi[0]),     "phi2": float(phi[1]),     "phi3": float(phi[2]),
+            "alpha1": float(alpha[0]),     "alpha2": float(alpha[1]),     "alpha3": float(alpha[2]),
         }

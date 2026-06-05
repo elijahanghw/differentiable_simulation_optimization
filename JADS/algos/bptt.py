@@ -183,10 +183,12 @@ def train(config: Dict[str, Any]) -> Any:
         )
         if has_morphological_loss:
             def _morphological_loss_fn(morph_params):
+                alpha = env.get_alpha(morph_params) if hasattr(env, "get_alpha") else None
                 return propeller_collision_loss_from_params(
                     env.get_l(morph_params),
                     env.get_theta(morph_params),
                     env.get_phi(morph_params),
+                    alpha=alpha,
                     weight=morph_loss_weight,
                 )
             morphological_grad_fn = jax.jit(jax.value_and_grad(_morphological_loss_fn))
@@ -267,7 +269,7 @@ def train(config: Dict[str, Any]) -> Any:
                     log_data["morphological_loss"] = float(morphological_loss)
                 if has_morph_info:
                     log_data.update({
-                        k: math.degrees(v) if k.startswith("theta") or k.startswith("phi") else v
+                        k: math.degrees(v) if k.startswith("theta") or k.startswith("phi") or k.startswith("alpha") else v
                         for k, v in env.get_morph_info(morph_params).items()
                     })
                 logger.log(log_data)
@@ -294,5 +296,8 @@ def train(config: Dict[str, Any]) -> Any:
     print(f"Training complete. Log saved to {csv_path}")
     if has_morph and has_morph_info:
         for k, v in env.get_morph_info(morph_params).items():
-            print(f"  {k} = {v:.4f}")
+            if k.startswith("theta") or k.startswith("phi") or k.startswith("alpha"):
+                print(f"  {k} = {math.degrees(v):.4f} deg")
+            else:
+                print(f"  {k} = {v:.4f}")
     return policy_params
