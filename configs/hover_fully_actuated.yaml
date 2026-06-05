@@ -5,8 +5,8 @@ env:
   name: hover
   integrator: semi_implicit_euler
   train_morphology: false
-  alternating_alpha: true
-  alpha_default: -0.7854  # pi/4 radians = 45°
+  alternating_phi: true
+  phi_default: -0.7854  # pi/4 radians = 45°
 
 # -----------------------------------------------------------------------
 # Policy

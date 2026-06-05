@@ -6,7 +6,7 @@ env:
   integrator: semi_implicit_euler
   train_morphology: true
   morph_init_scale: 0.0
-  alternating_alpha: false
+  alternating_phi: false
 
 # -----------------------------------------------------------------------
 # Policy

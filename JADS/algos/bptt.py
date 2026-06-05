@@ -22,6 +22,7 @@ Environment contract
   env.compute_loss(traj)      → (total_loss, mean_return)
 """
 
+import math
 import os
 import time
 from typing import Any, Dict
@@ -177,15 +178,15 @@ def train(config: Dict[str, Any]) -> Any:
         has_morphological_loss = (
             use_morph_loss
             and hasattr(env, "get_l")
+            and hasattr(env, "get_theta")
             and hasattr(env, "get_phi")
-            and hasattr(env, "get_alpha")
         )
         if has_morphological_loss:
             def _morphological_loss_fn(morph_params):
                 return propeller_collision_loss_from_params(
                     env.get_l(morph_params),
+                    env.get_theta(morph_params),
                     env.get_phi(morph_params),
-                    env.get_alpha(morph_params),
                     weight=morph_loss_weight,
                 )
             morphological_grad_fn = jax.jit(jax.value_and_grad(_morphological_loss_fn))
@@ -265,7 +266,10 @@ def train(config: Dict[str, Any]) -> Any:
                 if has_morphological_loss:
                     log_data["morphological_loss"] = float(morphological_loss)
                 if has_morph_info:
-                    log_data.update(env.get_morph_info(morph_params))
+                    log_data.update({
+                        k: math.degrees(v) if k.startswith("theta") or k.startswith("phi") else v
+                        for k, v in env.get_morph_info(morph_params).items()
+                    })
                 logger.log(log_data)
                 print(f"  elapsed: {time.time() - t_start:.1f}s")
         else:

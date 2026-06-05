@@ -5,8 +5,8 @@ env:
   name: hover
   integrator: semi_implicit_euler
   train_morphology: false
-  alternating_alpha: false
-  alpha_default: 0.0
+  alternating_phi: false
+  phi_default: 0.0
 
 # -----------------------------------------------------------------------
 # Policy
