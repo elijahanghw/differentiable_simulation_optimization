@@ -60,7 +60,7 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 2000
+  epochs: 3000
   horizon: 250
   batch_size: 64
   lr: 1.0e-3
