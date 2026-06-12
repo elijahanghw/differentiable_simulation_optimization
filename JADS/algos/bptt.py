@@ -28,11 +28,14 @@ import time
 from typing import Any, Dict
 
 import jax
+import jax.numpy as jnp
 import optax
 
 from JADS.tasks import make_env
 from JADS.drone_physics.morphology import propeller_collision_loss_from_params
+from JADS.drone_physics.quat_math import quat_to_euler
 from JADS.models import make_model, init_params
+from JADS.models.vel_odo import VelOdoActor
 from JADS.utils.logger import Logger
 from JADS.utils.checkpoint import save as save_checkpoint
 
@@ -74,6 +77,72 @@ def _build_loss_fn(env, policy, horizon: int):
         traj = batch_rollout(policy_params, init_states, init_obs)
         total_loss, mean_return = env.compute_loss(traj)
         return total_loss, mean_return
+
+    return loss_fn
+
+
+def _build_loss_fn_odo(env, policy, horizon: int, vel_aux_weight: float):
+    """
+    Rollout for VelOdoActor (GPS-denied, gt_odometry=False).
+
+    Carry: (state, env_obs, depth_prev, vel_prev, pos_est, hidden)
+
+    Per-step:
+      1. Extract imu_vec = [euler, omega, W] from state (avoids re-rendering).
+      2. Compute target_est = init_rel_pos + pos_est.
+      3. Call policy → (action, new_hidden, vel_est).
+      4. Step environment.
+      5. Advance pos_est += vel_est * dt.
+
+    Loss = env.compute_loss(traj) + vel_aux_weight * mean(||vel_est − vel_gt||²)
+    """
+    dt = env.dt
+
+    def single_rollout(policy_params, init_state, init_obs):
+        init_rel_pos = init_state[0:3] - init_state[19:22]   # start_pos − target
+        depth_t0     = init_obs[0]                            # (H, W) initial depth
+
+        def step(carry, _):
+            state, obs, depth_prev, vel_prev, pos_est, hidden = carry
+            depth_t = obs[0]   # env_obs[1] (obs_vec) is ignored; we build it here
+
+            # IMU-accessible quantities extracted from the physics state
+            euler   = jax.lax.stop_gradient(quat_to_euler(state[6:10]))
+            imu_vec = jnp.concatenate([euler, state[10:13], state[13:19]])  # 12
+
+            target_est = init_rel_pos + pos_est   # dead-reckoned relative position to target
+
+            action, new_hidden, vel_est = policy.apply(
+                {"params": policy_params},
+                depth_t, depth_prev, vel_prev, target_est, imu_vec, hidden,
+            )
+            new_state, new_obs, step_data = env.step(state, action)
+            new_pos_est = pos_est + vel_est * dt
+
+            step_data["vel_est"] = vel_est
+            step_data["vel_gt"]  = state[3:6]   # ground-truth world-frame velocity
+
+            return (new_state, new_obs, depth_t, vel_est, new_pos_est, new_hidden), step_data
+
+        init_carry = (
+            init_state,
+            init_obs,
+            jnp.zeros_like(depth_t0),   # depth_prev = zeros (no history at start)
+            jnp.zeros(3),                # vel_prev   = zeros
+            jnp.zeros(3),                # pos_est    = zeros (at start_pos)
+            policy.init_hidden(),
+        )
+        _, traj = jax.lax.scan(step, init_carry, None, length=horizon)
+        return traj
+
+    batch_rollout = jax.vmap(single_rollout, in_axes=(None, 0, 0))
+
+    def loss_fn(policy_params, init_states, init_obs):
+        traj = batch_rollout(policy_params, init_states, init_obs)
+        nav_loss, mean_return = env.compute_loss(traj)
+        vel_aux_loss = jnp.mean((traj["vel_est"] - traj["vel_gt"]) ** 2)
+        total_loss   = nav_loss + vel_aux_weight * vel_aux_loss
+        return total_loss, (mean_return, vel_aux_loss)
 
     return loss_fn
 
@@ -151,10 +220,13 @@ def train(config: Dict[str, Any]) -> Any:
     key = jax.random.PRNGKey(seed)
     key, init_key, morph_init_key = jax.random.split(key, 3)
     depth_shape = None
-    if pcfg["type"] == "cnn_gru" and hasattr(env, "cam_height"):
+    if hasattr(env, "cam_height") and pcfg["type"] in ("cnn_gru", "vel_odo_gru"):
         pool = getattr(env, "cam_pool", 2)
         depth_shape = (env.cam_height // pool, env.cam_width // pool)
     policy_params = init_params(policy, init_key, env.obs_dim, depth_shape=depth_shape)
+
+    has_vel_odo  = isinstance(policy, VelOdoActor)
+    vel_aux_weight = tcfg.get("vel_aux_weight", 0.1)
 
     # -- Optimiser ----------------------------------------------------------
     policy_schedule  = optax.linear_schedule(init_value=lr, end_value=lr_min, transition_steps=epochs)
@@ -192,6 +264,9 @@ def train(config: Dict[str, Any]) -> Any:
                     weight=morph_loss_weight,
                 )
             morphological_grad_fn = jax.jit(jax.value_and_grad(_morphological_loss_fn))
+    elif has_vel_odo:
+        loss_fn = _build_loss_fn_odo(env, policy, horizon, vel_aux_weight)
+        grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
     else:
         loss_fn = _build_loss_fn(env, policy, horizon)
         grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
@@ -201,6 +276,8 @@ def train(config: Dict[str, Any]) -> Any:
     csv_path  = log_cfg.get("csv_path", "logs/training.csv")
     ckpt_path = log_cfg.get("checkpoint_path", "checkpoints/policy.pkl")
     fields = ["epoch", "mean_return", "loss", "grad_norm"]
+    if has_vel_odo:
+        fields += ["vel_aux_loss"]
     if has_morph and use_morph_loss:
         fields += ["morphological_loss"]
     if has_morph and has_morph_info:
@@ -214,6 +291,9 @@ def train(config: Dict[str, Any]) -> Any:
     print(f"Devices      : {jax.devices()}")
     print(f"Env          : {ecfg['name']}  |  obs_dim={env.obs_dim}  act_dim={env.act_dim}")
     print(f"Morphology   : {'yes' if has_morph else 'no'}")
+    print(f"Odometry     : {'dead-reckoning (vel_odo_gru)' if has_vel_odo else 'ground-truth'}")
+    if has_vel_odo:
+        print(f"Vel aux wt   : {vel_aux_weight}")
     print(f"Policy       : {pcfg['type']}  |  params={n_params:,}")
     print(f"Horizon      : {horizon}  |  batch={batch_size}  epochs={epochs}")
     if has_morph:
@@ -273,6 +353,22 @@ def train(config: Dict[str, Any]) -> Any:
                         for k, v in env.get_morph_info(morph_params).items()
                     })
                 logger.log(log_data)
+                print(f"  elapsed: {time.time() - t_start:.1f}s")
+        elif has_vel_odo:
+            (loss, (mean_return, vel_aux_loss)), grads = grad_fn(policy_params, init_states, init_obs)
+            grad_norm = optax.global_norm(grads)
+
+            updates, policy_opt_state = policy_optimizer.update(grads, policy_opt_state)
+            policy_params = optax.apply_updates(policy_params, updates)
+
+            if epoch % log_every == 0 or epoch == epochs - 1:
+                logger.log({
+                    "epoch":        epoch,
+                    "mean_return":  float(mean_return),
+                    "loss":         float(loss),
+                    "grad_norm":    float(grad_norm),
+                    "vel_aux_loss": float(vel_aux_loss),
+                })
                 print(f"  elapsed: {time.time() - t_start:.1f}s")
         else:
             (loss, mean_return), grads = grad_fn(policy_params, init_states, init_obs)

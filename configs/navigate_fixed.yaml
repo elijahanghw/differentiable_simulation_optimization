@@ -4,6 +4,7 @@
 env:
   name: navigate
   integrator: semi_implicit_euler
+  gt_odometry: false
   train_morphology: false
   alternating_phi: false
   phi_default: 0.0
@@ -45,7 +46,8 @@ env:
 # Policy
 # -----------------------------------------------------------------------
 policy:
-  type: cnn_gru
+  # type: cnn_gru
+  type: vel_odo_gru
   squash_output: false
   conv_features: [32, 64, 128]
   kernel_sizes: [[2, 2], [3, 3], [3, 3]]
@@ -65,6 +67,7 @@ training:
   lr_min: 1.0e-5
   grad_clip: 1.0
   log_interval: 10
+  vel_aux_weight: 0.5
 
 # -----------------------------------------------------------------------
 # Depth camera
@@ -81,5 +84,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_fixed_columns_logs.csv
-  checkpoint_path: checkpoints/navigate_fixed_columns.pkl
+  csv_path: logs/navigate_fixed_columns_no_odom_logs.csv
+  checkpoint_path: checkpoints/navigate_fixed_columns_no_odom.pkl

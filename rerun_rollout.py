@@ -18,10 +18,13 @@ import numpy as np
 import rerun as rr
 import yaml
 
+import jax.numpy as jnp
+
 from JADS.tasks import make_env
 from JADS.drone_physics.quat_math import quat_to_rotmat, quat_to_euler
 from JADS.drone_physics.morphology import PROP_DIAMETER, MOUNT_RADIUS
 from JADS.models import make_model
+from JADS.models.vel_odo import VelOdoActor
 from JADS.utils.checkpoint import load as load_checkpoint
 
 
@@ -205,6 +208,7 @@ def _log_scene(scene_cfg, scene_array):
 def run_rollout(env, policy, policy_params, morph_params, key, steps):
     has_hidden    = hasattr(policy, "init_hidden")
     has_depth     = hasattr(policy, "conv_features")
+    has_vel_odo   = isinstance(policy, VelOdoActor)
     has_vis_depth = hasattr(env, "get_vis_depth")
 
     obs, state, _ = env.reset(key)
@@ -213,8 +217,26 @@ def run_rollout(env, policy, policy_params, morph_params, key, steps):
 
     hidden = policy.init_hidden() if has_hidden else None
 
+    if has_vel_odo:
+        depth_prev = jnp.zeros_like(obs[0])
+        vel_prev   = jnp.zeros(3)
+        pos_est    = jnp.zeros(3)
+        init_rel_pos = jnp.array(state[0:3]) - jnp.array(state[19:22])
+
     for _ in range(steps):
-        if has_hidden:
+        if has_vel_odo:
+            depth_t    = obs[0]
+            euler      = quat_to_euler(jnp.array(state[6:10]))
+            imu_vec    = jnp.concatenate([euler, jnp.array(state[10:13]), jnp.array(state[13:19])])
+            target_est = init_rel_pos + pos_est
+            action, hidden, vel_est = policy.apply(
+                {"params": policy_params},
+                depth_t, depth_prev, vel_prev, target_est, imu_vec, hidden,
+            )
+            depth_prev = depth_t
+            vel_prev   = vel_est
+            pos_est    = pos_est + vel_est * env.dt
+        elif has_hidden:
             if has_depth:
                 depth_img, obs_vec = obs
                 action, hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)

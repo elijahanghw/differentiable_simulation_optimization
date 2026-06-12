@@ -75,6 +75,7 @@ class Navigate:
     phi_min:   float = -jnp.pi / 2; phi_max:   float = jnp.pi / 2;  phi_default:   float = 0.0
     alpha_min: float = 0.0;         alpha_max: float = jnp.pi / 2;  alpha_default: float = 0.0
     alternating_phi: bool = False
+    gt_odometry:      bool = True   # False → GPS-denied; obs returns IMU-only vec, BPTT handles dead reckoning
     train_morphology:  bool = False
     morph_init_scale:  float = 0.0  # std of Normal noise added to raw pre-sigmoid values; 0 = deterministic
     integrator: str = "rk4"
@@ -128,6 +129,9 @@ class Navigate:
 
         self.state_dim = 22 + self.scene_cfg.scene_dim
         self._gd_factor = float(self.grad_decay ** self.dt)
+        # obs_dim is always 18; when gt_odometry=False the BPTT loop for
+        # VelOdoActor constructs the full obs_vec from its carry (vel_prev,
+        # target_est) and the raw state (imu_vec), ignoring _get_obs's vec.
 
     # -----------------------------------------------------------------------
     # Reset
@@ -189,10 +193,16 @@ class Navigate:
     # -----------------------------------------------------------------------
 
     def _get_obs(self, state: jnp.ndarray) -> jnp.ndarray:
-        rel_pos = state[0:3] - state[19:22]
-        euler = jax.lax.stop_gradient(quat_to_euler(state[6:10]))
-        drone_states = jnp.concatenate([rel_pos, state[3:6], euler, state[10:13], state[13:19]])
         depth_map = jax.lax.stop_gradient(self._get_processed_depth(state))
+        euler     = jax.lax.stop_gradient(quat_to_euler(state[6:10]))
+        if self.gt_odometry:
+            rel_pos     = state[0:3] - state[19:22]
+            drone_states = jnp.concatenate([rel_pos, state[3:6], euler, state[10:13], state[13:19]])
+        else:
+            # VelOdoActor: BPTT constructs the full obs_vec from its carry.
+            # Return only depth + a placeholder imu vec so shapes stay consistent.
+            drone_states = jnp.concatenate([euler, state[10:13], state[13:19],
+                                            jnp.zeros(6)])  # zeros pad to 18
         return (depth_map, drone_states)
     
     def _get_depth(self, state: jnp.ndarray) -> jnp.ndarray:
