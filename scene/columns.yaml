@@ -1,6 +1,6 @@
 # Columns — Tall boxes.
-arena_x_min:  2.0
-arena_x_max:  8.0
+arena_x_min:  1.5
+arena_x_max:  8.5
 arena_y_min: -3.0
 arena_y_max:  3.0
 arena_z_min: -1.0

@@ -24,16 +24,16 @@ env:
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
   init_x_max: 1.0
-  init_y_min: -3.0
-  init_y_max: 3.0
-  init_z_min: -1.5
-  init_z_max: -1.5
+  init_y_min: -2.0
+  init_y_max: 2.0
+  init_z_min: -1.4
+  init_z_max: -1.6
 
   # ---- Target spawn bounds -----------------------------------------------
   target_x_min: 9.0
   target_x_max: 10.0
-  target_y_min: -3.0
-  target_y_max: 3.0
+  target_y_min: -2.0
+  target_y_max: 2.0
   target_z_min: -1.5
   target_z_max: -1.5
 
@@ -60,15 +60,15 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 3000 #5000
-  morph_epochs: 2000 #4000
+  epochs: 4000
+  morph_epochs: 3000
   morphological_loss: true
   morphological_loss_weight: 500.0
   horizon: 250
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-5
-  morph_lr: 1.0e-2 #5.0e-3
+  morph_lr: 5.0e-3
   morph_lr_min: 1.0e-3
   grad_clip: 1.0
   log_interval: 10
@@ -88,5 +88,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_morph_test_logs.csv
-  checkpoint_path: checkpoints/navigate_morph_test.pkl
+  csv_path: logs/navigate_morph_logs.csv
+  checkpoint_path: checkpoints/navigate_morph.pkl
