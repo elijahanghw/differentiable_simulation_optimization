@@ -206,18 +206,20 @@ class Navigate:
     def _unpack_scene(self, state: jnp.ndarray) -> dict:
         """Extract obstacle geometry from state, handling both scene modes."""
         if self.scene_cfg.procedural:
-            box_centers, box_half_extents = self.scene_cfg.get_local_obstacles(
+            (sphere_centers, sphere_radii,
+             box_centers, box_half_extents,
+             cap_centers, cap_axes, cap_hh, cap_radii) = self.scene_cfg.get_local_obstacles(
                 state[0:3], state[22]
             )
             return {
-                "sphere_centers":    jnp.zeros((0, 3), jnp.float32),
-                "sphere_radii":      jnp.zeros((0,),   jnp.float32),
+                "sphere_centers":    sphere_centers,
+                "sphere_radii":      sphere_radii,
                 "box_centers":       box_centers,
                 "box_half_extents":  box_half_extents,
-                "cylinder_centers":  jnp.zeros((0, 3), jnp.float32),
-                "cylinder_axes":     jnp.zeros((0, 3), jnp.float32),
-                "cylinder_hh":       jnp.zeros((0,),   jnp.float32),
-                "cylinder_radii":    jnp.zeros((0,),   jnp.float32),
+                "cylinder_centers":  cap_centers,
+                "cylinder_axes":     cap_axes,
+                "cylinder_hh":       cap_hh,
+                "cylinder_radii":    cap_radii,
             }
         return self.scene_cfg.unpack(state[22:])
 
