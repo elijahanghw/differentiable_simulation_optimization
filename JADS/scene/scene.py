@@ -14,14 +14,17 @@ Two modes, selected by the YAML config:
       [Ns_t*4+Nb_t*3  : Ns_t*4+Nb_t*6  ]  box half-extents (Nb_t, 3)
       [Ns_t*4+Nb_t*6  : ...]              cylinder params  (Nc, 8)
 
-  PROCEDURAL mode  (obstacles_per_cell > 0)
+  PROCEDURAL mode  (boxes_per_cell / spheres_per_cell / capsules_per_cell > 0)
     Obstacles are generated on-the-fly each step from the drone position and
     a per-episode seed.  The world is infinite: the same (seed, cell) always
     produces the same obstacles, so the scene is consistent across timesteps.
 
     scene_array = cfg.sample(key)      → shape (1,) — just the float32 seed
-    box_c, box_he = cfg.get_local_obstacles(drone_pos, seed_float)
-        → (K, 3), (K, 3)  where K = 9 × obstacles_per_cell
+    (sphere_c, sphere_r,
+     box_c, box_he,
+     cap_c, cap_ax, cap_hh, cap_r) = cfg.get_local_obstacles(drone_pos, seed_float)
+
+    K_s = 9 × spheres_per_cell, K_b = 9 × boxes_per_cell, K_c = 9 × capsules_per_cell
 
     Cell size is set to cam_max_range by Navigate.__init__ after construction.
     A 3×3 grid of cells centered on the drone's current cell is loaded;
@@ -42,14 +45,16 @@ class SceneConfig:
     """
     All parameters controlling obstacle generation.
 
-    Set obstacles_per_cell > 0 to enable procedural infinite-world mode.
-    Otherwise, set n_spheres / n_boxes / n_capsules / n_windows for the
-    legacy static-scene mode.
+    Set any of boxes_per_cell / spheres_per_cell / capsules_per_cell > 0 to
+    enable procedural infinite-world mode.  Otherwise, set
+    n_spheres / n_boxes / n_capsules / n_windows for static-scene mode.
     """
 
     # ---- Procedural mode ---------------------------------------------------
-    obstacles_per_cell: int   = 0     # >0 → procedural mode
-    cell_size:          float = 8.0   # set to cam_max_range by Navigate.__init__
+    boxes_per_cell:    int   = 0     # boxes per cell  }
+    spheres_per_cell:  int   = 0     # spheres per cell } any >0 → procedural mode
+    capsules_per_cell: int   = 0     # capsules per cell}
+    cell_size:         float = 8.0   # set to cam_max_range by Navigate.__init__
 
     # ---- Arena (static mode spawn bounds / procedural z bounds) ------------
     arena_x_min: float = 0.0;  arena_x_max: float = 10.0
@@ -85,7 +90,11 @@ class SceneConfig:
     procedural: bool = _field(init=False, repr=True)
 
     def __post_init__(self):
-        self.procedural = self.obstacles_per_cell > 0
+        self.procedural = (
+            self.boxes_per_cell > 0 or
+            self.spheres_per_cell > 0 or
+            self.capsules_per_cell > 0
+        )
         if self.procedural:
             self.scene_dim = 1  # only the seed float
         else:
@@ -103,17 +112,29 @@ class SceneConfig:
         seed_float: jnp.ndarray,  # ()    float32 episode seed
     ):
         """
-        Generate K = 9 × obstacles_per_cell boxes for the 3×3 cell
-        neighbourhood centred on the drone's current grid cell.
+        Generate obstacles for the 3×3 cell neighbourhood centred on the drone.
 
         The same (seed, cell_ix, cell_iy) always produces identical obstacles,
         so the scene is persistent across timesteps without storing positions.
 
+        Key split order per cell (17 total):
+          0-3:  sphere cx, cy, cz, r
+          4-9:  box cx, cy, cz, hx, hy, hz
+          10-16: capsule cx, cy, cz, theta, phi, hh, r
+
         Returns:
-            box_centers      (K, 3) float32
-            box_half_extents (K, 3) float32
+            sphere_centers   (9*spheres_per_cell, 3) float32
+            sphere_radii     (9*spheres_per_cell,)   float32
+            box_centers      (9*boxes_per_cell, 3)   float32
+            box_half_extents (9*boxes_per_cell, 3)   float32
+            cap_centers      (9*capsules_per_cell, 3) float32
+            cap_axes         (9*capsules_per_cell, 3) float32
+            cap_hh           (9*capsules_per_cell,)   float32
+            cap_radii        (9*capsules_per_cell,)   float32
         """
-        M         = self.obstacles_per_cell
+        Ms        = self.spheres_per_cell
+        Mb        = self.boxes_per_cell
+        Mc        = self.capsules_per_cell
         cell_size = self.cell_size
 
         ix_c = jnp.floor(drone_pos[0] / cell_size).astype(jnp.int32)
@@ -132,29 +153,62 @@ class SceneConfig:
             iy = iy_c + offset[1]
             # fold_in accepts int32; negative values wrap to large uint32, still unique
             cell_key = jax.random.fold_in(jax.random.fold_in(base_key, ix), iy)
-            k1, k2, k3, k4, k5, k6 = jax.random.split(cell_key, 6)
+            keys = jax.random.split(cell_key, 17)
 
-            cx = jax.random.uniform(
-                k1, (M,),
-                minval=ix.astype(jnp.float32) * cell_size,
-                maxval=(ix + 1).astype(jnp.float32) * cell_size,
-            )
-            cy = jax.random.uniform(
-                k2, (M,),
-                minval=iy.astype(jnp.float32) * cell_size,
-                maxval=(iy + 1).astype(jnp.float32) * cell_size,
-            )
-            cz = jax.random.uniform(k3, (M,), minval=self.arena_z_min, maxval=self.arena_z_max)
-            hx = jax.random.uniform(k4, (M,), minval=self.box_hx_min,  maxval=self.box_hx_max)
-            hy = jax.random.uniform(k5, (M,), minval=self.box_hy_min,  maxval=self.box_hy_max)
-            hz = jax.random.uniform(k6, (M,), minval=self.box_hz_min,  maxval=self.box_hz_max)
+            x_min = ix.astype(jnp.float32) * cell_size
+            x_max = (ix + 1).astype(jnp.float32) * cell_size
+            y_min = iy.astype(jnp.float32) * cell_size
+            y_max = (iy + 1).astype(jnp.float32) * cell_size
 
-            centers      = jnp.stack([cx, cy, cz], axis=-1)  # (M, 3)
-            half_extents = jnp.stack([hx, hy, hz], axis=-1)  # (M, 3)
-            return centers, half_extents
+            # Spheres
+            s_cx = jax.random.uniform(keys[0], (Ms,), minval=x_min, maxval=x_max)
+            s_cy = jax.random.uniform(keys[1], (Ms,), minval=y_min, maxval=y_max)
+            s_cz = jax.random.uniform(keys[2], (Ms,), minval=self.arena_z_min, maxval=self.arena_z_max)
+            s_r  = jax.random.uniform(keys[3], (Ms,), minval=self.sphere_r_min, maxval=self.sphere_r_max)
+            sphere_centers = jnp.stack([s_cx, s_cy, s_cz], axis=-1)  # (Ms, 3)
+            sphere_radii   = s_r                                        # (Ms,)
 
-        centers, half_extents = jax.vmap(sample_cell)(offsets)  # (9, M, 3)
-        return centers.reshape(9 * M, 3), half_extents.reshape(9 * M, 3)
+            # Boxes
+            cx = jax.random.uniform(keys[4], (Mb,), minval=x_min, maxval=x_max)
+            cy = jax.random.uniform(keys[5], (Mb,), minval=y_min, maxval=y_max)
+            cz = jax.random.uniform(keys[6], (Mb,), minval=self.arena_z_min, maxval=self.arena_z_max)
+            hx = jax.random.uniform(keys[7], (Mb,), minval=self.box_hx_min,  maxval=self.box_hx_max)
+            hy = jax.random.uniform(keys[8], (Mb,), minval=self.box_hy_min,  maxval=self.box_hy_max)
+            hz = jax.random.uniform(keys[9], (Mb,), minval=self.box_hz_min,  maxval=self.box_hz_max)
+            box_centers      = jnp.stack([cx, cy, cz], axis=-1)  # (Mb, 3)
+            box_half_extents = jnp.stack([hx, hy, hz], axis=-1)  # (Mb, 3)
+
+            # Capsules
+            c_cx  = jax.random.uniform(keys[10], (Mc,), minval=x_min, maxval=x_max)
+            c_cy  = jax.random.uniform(keys[11], (Mc,), minval=y_min, maxval=y_max)
+            c_cz  = jax.random.uniform(keys[12], (Mc,), minval=self.arena_z_min, maxval=self.arena_z_max)
+            theta = jax.random.uniform(keys[13], (Mc,), minval=0.0, maxval=math.pi)
+            phi   = jax.random.uniform(keys[14], (Mc,), minval=0.0, maxval=2 * math.pi)
+            c_hh  = jax.random.uniform(keys[15], (Mc,), minval=self.capsule_hh_min, maxval=self.capsule_hh_max)
+            c_r   = jax.random.uniform(keys[16], (Mc,), minval=self.capsule_r_min,  maxval=self.capsule_r_max)
+            cap_axes    = jnp.stack([jnp.sin(theta) * jnp.cos(phi),
+                                     jnp.sin(theta) * jnp.sin(phi),
+                                     jnp.cos(theta)], axis=-1)  # (Mc, 3)
+            cap_centers = jnp.stack([c_cx, c_cy, c_cz], axis=-1)  # (Mc, 3)
+
+            return (sphere_centers, sphere_radii,
+                    box_centers, box_half_extents,
+                    cap_centers, cap_axes, c_hh, c_r)
+
+        results = jax.vmap(sample_cell)(offsets)  # each element has leading dim 9
+        (sphere_centers, sphere_radii,
+         box_centers, box_half_extents,
+         cap_centers, cap_axes, cap_hh, cap_radii) = results
+        return (
+            sphere_centers.reshape(9 * Ms, 3),
+            sphere_radii.reshape(9 * Ms),
+            box_centers.reshape(9 * Mb, 3),
+            box_half_extents.reshape(9 * Mb, 3),
+            cap_centers.reshape(9 * Mc, 3),
+            cap_axes.reshape(9 * Mc, 3),
+            cap_hh.reshape(9 * Mc),
+            cap_radii.reshape(9 * Mc),
+        )
 
     # -----------------------------------------------------------------------
     # Static mode — sampling
@@ -289,10 +343,11 @@ class SceneConfig:
 
     def summary(self) -> str:
         if self.procedural:
-            K = 9 * self.obstacles_per_cell
             return (
                 f"SceneConfig  procedural  cell_size={self.cell_size:.1f}m  "
-                f"obstacles_per_cell={self.obstacles_per_cell}  K={K}"
+                f"boxes={self.boxes_per_cell}  spheres={self.spheres_per_cell}  "
+                f"capsules={self.capsules_per_cell}  "
+                f"K={9*(self.boxes_per_cell+self.spheres_per_cell+self.capsules_per_cell)}"
             )
         vol = (
             (self.arena_x_max - self.arena_x_min)

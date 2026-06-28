@@ -1,26 +1,51 @@
-# Dense random obstacles — 15 spheres, 15 boxes, 15 capsules (morphology training).
-arena_x_min:  1.5
-arena_x_max:  8.5
-arena_y_min: -3.0
-arena_y_max:  3.0
+# Mixed obstacles — procedural infinite world with boxes, spheres, and capsules.
+# Cell size is set automatically to cam_max_range at runtime.
+# K = 9 × (boxes + spheres + capsules per cell) obstacles loaded per step.
 arena_z_min: -4.0
 arena_z_max: -0.5
 
-n_spheres:  10
-n_boxes:    10
-n_capsules: 10
+boxes_per_cell:    2
+spheres_per_cell:  2
+capsules_per_cell: 0
 
 sphere_r_min: 0.10
-sphere_r_max: 0.60
+sphere_r_max: 0.50
 
 box_hx_min: 0.10
-box_hx_max: 0.60
+box_hx_max: 0.50
 box_hy_min: 0.10
-box_hy_max: 0.60
+box_hy_max: 0.50
 box_hz_min: 0.10
-box_hz_max: 0.60
+box_hz_max: 0.50
 
 capsule_r_min: 0.10
 capsule_r_max: 0.50
-capsule_hh_min: 0.30
-capsule_hh_max: 1.20
+capsule_hh_min: 0.20
+capsule_hh_max: 0.50
+
+
+# arena_x_min:  1.5
+# arena_x_max:  8.5
+# arena_y_min: -3.0
+# arena_y_max:  3.0
+# arena_z_min: -4.0
+# arena_z_max: -0.5
+
+# n_spheres:  10
+# n_boxes:    10
+# n_capsules: 10
+
+# sphere_r_min: 0.10
+# sphere_r_max: 0.60
+
+# box_hx_min: 0.10
+# box_hx_max: 0.60
+# box_hy_min: 0.10
+# box_hy_max: 0.60
+# box_hz_min: 0.10
+# box_hz_max: 0.60
+
+# capsule_r_min: 0.10
+# capsule_r_max: 0.50
+# capsule_hh_min: 0.30
+# capsule_hh_max: 1.20
