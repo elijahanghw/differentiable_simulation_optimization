@@ -167,7 +167,72 @@ def _quat_z_to_axis(axes):
     return np.array(quats, dtype=np.float32)
 
 
-def _log_scene(scene_cfg, scene_array):
+def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_max):
+    """
+    Enumerate all procedural box obstacles in an x/y bounding region.
+    Pure Python + JAX (not jitted) — only called once for visualization.
+
+    Returns:
+        centers      (N_total, 3) numpy array
+        half_extents (N_total, 3) numpy array
+    """
+    cell_size = scene_cfg.cell_size
+    M         = scene_cfg.obstacles_per_cell
+
+    ix_min = int(np.floor(x_min / cell_size))
+    ix_max = int(np.floor(x_max / cell_size))
+    iy_min = int(np.floor(y_min / cell_size))
+    iy_max = int(np.floor(y_max / cell_size))
+
+    base_key = jax.random.PRNGKey(int(seed_float))
+
+    all_centers, all_half_extents = [], []
+    for ix in range(ix_min, ix_max + 1):
+        for iy in range(iy_min, iy_max + 1):
+            # Cast via int32 → uint32 so negative cell indices wrap correctly,
+            # matching the jnp.int32 behaviour in scene.py's get_local_obstacles.
+            cell_key = jax.random.fold_in(
+                jax.random.fold_in(base_key, np.uint32(np.int32(ix))),
+                np.uint32(np.int32(iy)),
+            )
+            k1, k2, k3, k4, k5, k6 = jax.random.split(cell_key, 6)
+
+            cx = jax.random.uniform(k1, (M,), minval=ix * cell_size,       maxval=(ix + 1) * cell_size)
+            cy = jax.random.uniform(k2, (M,), minval=iy * cell_size,       maxval=(iy + 1) * cell_size)
+            cz = jax.random.uniform(k3, (M,), minval=scene_cfg.arena_z_min, maxval=scene_cfg.arena_z_max)
+            hx = jax.random.uniform(k4, (M,), minval=scene_cfg.box_hx_min,  maxval=scene_cfg.box_hx_max)
+            hy = jax.random.uniform(k5, (M,), minval=scene_cfg.box_hy_min,  maxval=scene_cfg.box_hy_max)
+            hz = jax.random.uniform(k6, (M,), minval=scene_cfg.box_hz_min,  maxval=scene_cfg.box_hz_max)
+
+            all_centers.append(np.stack([np.array(cx), np.array(cy), np.array(cz)], axis=-1))
+            all_half_extents.append(np.stack([np.array(hx), np.array(hy), np.array(hz)], axis=-1))
+
+    return np.concatenate(all_centers), np.concatenate(all_half_extents)
+
+
+def _log_scene(scene_cfg, scene_array, traj_positions=None):
+    if scene_cfg.procedural:
+        # Derive the region to visualize from the trajectory bounding box,
+        # extended by one cell on each side so the drone's full view is covered.
+        buf  = scene_cfg.cell_size
+        seed = float(scene_array[0])
+        xs, ys = traj_positions[:, 0], traj_positions[:, 1]
+        x_min, x_max = float(xs.min()) - buf, float(xs.max()) + buf
+        y_min, y_max = float(ys.min()) - buf, float(ys.max()) + buf
+
+        cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
+        hx, hy = (x_max - x_min) / 2 + 1.0, (y_max - y_min) / 2 + 1.0
+        rr.log("world/ground", rr.Boxes3D(
+            centers=[[cx, cy, 0.02]], half_sizes=[[hx, hy, 0.02]],
+            colors=[[130, 130, 130, 255]], fill_mode="solid",
+        ), static=True)
+
+        bc, bhe = _get_all_obstacles_for_region(scene_cfg, seed, x_min, x_max, y_min, y_max)
+        rr.log("world/boxes", rr.Boxes3D(
+            centers=bc, half_sizes=bhe, colors=[[60, 100, 220, 200]], fill_mode="solid",
+        ), static=True)
+        return
+
     arrays = scene_cfg.unpack(scene_array)
 
     cx = (scene_cfg.arena_x_min + scene_cfg.arena_x_max) / 2
@@ -291,7 +356,7 @@ def main():
     rr.log("/", rr.ViewCoordinates.FRD, static=True)
 
     if hasattr(env, "scene_cfg"):
-        _log_scene(env.scene_cfg, states[0][22:])
+        _log_scene(env.scene_cfg, states[0][22:], traj_positions=states[:, 0:3])
         rr.log("world/target", rr.Points3D(
             [states[0][19:22]], colors=[[255, 215, 0]], radii=0.15,
         ), static=True)

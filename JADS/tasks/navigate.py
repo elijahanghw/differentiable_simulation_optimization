@@ -27,7 +27,9 @@ class Navigate:
     State layout (flat float32 array of length state_dim):
         [0:19]         drone state  (pos, vel, quat, omega, W)
         [19:22]        target pos
-        [22:]          scene array  (from SceneConfig.sample — see scene.py)
+        [22:]          scene array  (SceneConfig.sample — see scene.py)
+                         static mode:     full obstacle geometry  (scene_dim floats)
+                         procedural mode: single float32 episode seed  (1 float)
 
     Observation: plain drone obs (pos, vel, euler, omega, W) — 18 dims.
     Depth-image obs will be added once the renderer is integrated.
@@ -129,6 +131,9 @@ class Navigate:
             self.cam_max_range      = float(dc.get("max_range",      self.cam_max_range))
             self.cam_quantization_m = float(dc.get("quantization_m", self.cam_quantization_m))
 
+        if self.scene_cfg.procedural:
+            self.scene_cfg.cell_size = self.cam_max_range
+
         self.state_dim = 22 + self.scene_cfg.scene_dim
         self._gd_factor = float(self.grad_decay ** self.dt)
 
@@ -198,6 +203,24 @@ class Navigate:
         depth_map = jax.lax.stop_gradient(self._get_processed_depth(state))
         return (depth_map, drone_states)
     
+    def _unpack_scene(self, state: jnp.ndarray) -> dict:
+        """Extract obstacle geometry from state, handling both scene modes."""
+        if self.scene_cfg.procedural:
+            box_centers, box_half_extents = self.scene_cfg.get_local_obstacles(
+                state[0:3], state[22]
+            )
+            return {
+                "sphere_centers":    jnp.zeros((0, 3), jnp.float32),
+                "sphere_radii":      jnp.zeros((0,),   jnp.float32),
+                "box_centers":       box_centers,
+                "box_half_extents":  box_half_extents,
+                "cylinder_centers":  jnp.zeros((0, 3), jnp.float32),
+                "cylinder_axes":     jnp.zeros((0, 3), jnp.float32),
+                "cylinder_hh":       jnp.zeros((0,),   jnp.float32),
+                "cylinder_radii":    jnp.zeros((0,),   jnp.float32),
+            }
+        return self.scene_cfg.unpack(state[22:])
+
     def _get_depth(self, state: jnp.ndarray) -> jnp.ndarray:
         """
         Render a depth image from the drone's perspective.
@@ -210,7 +233,7 @@ class Navigate:
             0 = closer than cam_min_range.
             cam_max_range = no-hit or saturated.
         """
-        arrays = self.scene_cfg.unpack(state[22:])
+        arrays = self._unpack_scene(state)
         return apply_sensor_noise(
             render_depth(
                 position         = state[0:3],
@@ -231,10 +254,10 @@ class Navigate:
             max_range      = self.cam_max_range,
             quantization_m = self.cam_quantization_m,
         )
-    
+
     def get_vis_depth(self, state: jnp.ndarray, width: int = 320, height: int = 240) -> jnp.ndarray:
         """Render depth at arbitrary resolution for visualization (no pooling, no normalization)."""
-        arrays = self.scene_cfg.unpack(state[22:])
+        arrays = self._unpack_scene(state)
         return apply_sensor_noise(
             render_depth(
                 position         = state[0:3],
@@ -272,7 +295,7 @@ class Navigate:
         min(body_center_dist, min_i(motor_dist_i - motor_collision_radius)).
         """
         pos    = state[0:3]
-        arrays = self.scene_cfg.unpack(state[22:])
+        arrays = self._unpack_scene(state)
 
         def _point_dist(pt):
             d = point_plane_dist(pt, jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, -1.0]))
