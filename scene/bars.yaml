@@ -1,0 +1,16 @@
+# Bars — Long boxes.
+arena_x_min:  1.5
+arena_x_max:  8.5
+arena_y_min: -0.5
+arena_y_max:  0.5
+arena_z_min: -5.0
+arena_z_max: 0.0
+
+n_boxes:    15
+
+box_hx_min: 0.05
+box_hx_max: 0.20
+box_hy_min: 1.00
+box_hy_max: 1.50
+box_hz_min: 0.05
+box_hz_max: 0.20

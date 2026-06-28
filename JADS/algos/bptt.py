@@ -269,7 +269,7 @@ def train(config: Dict[str, Any]) -> Any:
                     log_data["morphological_loss"] = float(morphological_loss)
                 if has_morph_info:
                     log_data.update({
-                        k: math.degrees(v) if k.startswith("theta") or k.startswith("phi") or k.startswith("alpha") else v
+                        k: math.degrees(v) if k.startswith("theta") or k.startswith("phi") or k.startswith("alpha") or k.startswith("psi") else v
                         for k, v in env.get_morph_info(morph_params).items()
                     })
                 logger.log(log_data)
@@ -296,7 +296,7 @@ def train(config: Dict[str, Any]) -> Any:
     print(f"Training complete. Log saved to {csv_path}")
     if has_morph and has_morph_info:
         for k, v in env.get_morph_info(morph_params).items():
-            if k.startswith("theta") or k.startswith("phi") or k.startswith("alpha"):
+            if k.startswith("theta") or k.startswith("phi") or k.startswith("alpha") or k.startswith("psi"):
                 print(f"  {k} = {math.degrees(v):.4f} deg")
             else:
                 print(f"  {k} = {v:.4f}")

@@ -4,7 +4,8 @@
 env:
   name: navigate
   integrator: semi_implicit_euler
-  train_morphology: false
+  train_morphology: true
+  morph_init_scale: 1.0
   alternating_phi: false
   phi_default: 0.0
   grad_decay: 0.4
@@ -23,22 +24,22 @@ env:
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
   init_x_max: 1.0
-  init_y_min: -1.0
-  init_y_max: 1.0
-  init_z_min: -1.5
-  init_z_max: -1.5
+  init_y_min: -2.0
+  init_y_max: 2.0
+  init_z_min: -1.4
+  init_z_max: -1.6
 
   # ---- Target spawn bounds -----------------------------------------------
   target_x_min: 9.0
   target_x_max: 10.0
-  target_y_min: -0.0
-  target_y_max: 0.0
+  target_y_min: -2.0
+  target_y_max: 2.0
   target_z_min: -1.5
   target_z_max: -1.5
 
   # ---- Scene (random obstacles) -----------------------------------------
   # Path to a scene YAML in scene/ — or replace with an inline dict.
-  scene: scene/window.yaml
+  scene: scene/window_tall.yaml
 
 # -----------------------------------------------------------------------
 # Policy
@@ -58,10 +59,15 @@ policy:
 # -----------------------------------------------------------------------
 training:
   epochs: 4000
+  morph_epochs: 3000
+  morphological_loss: true
+  morphological_loss_weight: 500.0
   horizon: 250
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-5
+  morph_lr: 5.0e-3
+  morph_lr_min: 1.0e-3
   grad_clip: 1.0
   log_interval: 10
 
@@ -73,12 +79,12 @@ depth_camera:
   width: 64             # pixels  → 16 after 4×4 pool
   height: 48            # pixels  → 12 after 4×4 pool
   min_range: 0.3        # m  — closer than this → 0 (blind zone)
-  max_range: 24.0        # m  — farther / no-hit → max_range (saturated)
+  max_range: 3.0        # m  — farther / no-hit → max_range (saturated)
   quantization_m: 0.001 # m  — depth step size (1 mm, matches uint16 output)
 
 # -----------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_window_small_logs.csv
-  checkpoint_path: checkpoints/navigate_window_small.pkl
+  csv_path: logs/navigate_morph_logs.csv
+  checkpoint_path: checkpoints/navigate_morph.pkl

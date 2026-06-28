@@ -74,7 +74,7 @@ depth_camera:
   width: 64             # pixels  → 16 after 4×4 pool
   height: 48            # pixels  → 12 after 4×4 pool
   min_range: 0.3        # m  — closer than this → 0 (blind zone)
-  max_range: 24.0        # m  — farther / no-hit → max_range (saturated)
+  max_range: 3.0        # m  — farther / no-hit → max_range (saturated)
   quantization_m: 0.001 # m  — depth step size (1 mm, matches uint16 output)
 
 # -----------------------------------------------------------------------

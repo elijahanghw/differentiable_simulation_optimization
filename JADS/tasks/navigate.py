@@ -70,10 +70,13 @@ class Navigate:
     cam_quantization_m: float = 0.001
 
     # ---- Morphology --------------------------------------------------------
-    l_min:     float = 0.06;        l_max:     float = 0.15;        l_default:     float = 0.10
+    l_min:     float = 0.06;        l_max:     float = 0.14;        l_default:     float = 0.10
+    # l_min:     float = 0.06;        l_max:     float = 0.15;        l_default:     float = 0.10
+    psi_min:   float = -jnp.pi/9;   psi_max:   float = jnp.pi/9;    psi_default:   float = 0.0
     theta_min: float = -jnp.pi / 6; theta_max: float = jnp.pi / 6;  theta_default: float = 0.0
     phi_min:   float = -jnp.pi / 2; phi_max:   float = jnp.pi / 2;  phi_default:   float = 0.0
-    alpha_min: float = 0.0;         alpha_max: float = jnp.pi / 2;  alpha_default: float = 0.0
+    alpha_min: float = -jnp.pi/2;         alpha_max: float = jnp.pi / 2;  alpha_default: float = 0.0
+    # alpha_min: float = 0.0;         alpha_max: float = jnp.pi / 2;  alpha_default: float = 0.0
     alternating_phi: bool = False
     train_morphology:  bool = False
     morph_init_scale:  float = 0.0  # std of Normal noise added to raw pre-sigmoid values; 0 = deterministic
@@ -304,11 +307,13 @@ class Navigate:
         # ---- Morphology ----------------------------------------------------
         if self.train_morphology and morph_params is not None:
             l = self.get_l(morph_params)
+            psi = self.get_psi(morph_params)
             theta = self.get_theta(morph_params)
             phi = self.get_phi(morph_params)
             alpha = self.get_alpha(morph_params)
         else:
             l     = jnp.full(3, self.l_default)
+            psi   = jnp.full(3, self.psi_default)
             theta = jnp.full(3, self.theta_default)
             if self.alternating_phi:
                 phi = jnp.array([self.phi_default, -self.phi_default, self.phi_default])
@@ -316,7 +321,7 @@ class Navigate:
                 phi = jnp.full(3, self.phi_default)
             alpha  = jnp.full(3, self.alpha_default)
 
-        Bf, Bm, m, J, J_inv, motor_pos_body = morphology(l, theta, phi, alpha)
+        Bf, Bm, m, J, J_inv, motor_pos_body = morphology(l, psi, theta, phi, alpha)
         U = jnp.clip(action, -1.0, 1.0)
 
         integrators = {"euler": forward_euler, "semi_implicit_euler": semi_implicit_euler, "rk4": rk4}
@@ -418,19 +423,23 @@ class Navigate:
             ])
         else:
             phi_raw = jnp.zeros(3)
-        params = {"l_raw": jnp.zeros(3), "theta_raw": jnp.zeros(3), "phi_raw": phi_raw, "alpha_raw": jnp.zeros(3)}
+        params = {"l_raw": jnp.zeros(3), "psi_raw": jnp.zeros(3), "theta_raw": jnp.zeros(3), "phi_raw": phi_raw, "alpha_raw": jnp.zeros(3)}
         if key is not None and self.morph_init_scale > 0.0:
-            keys = jax.random.split(key, 4)
+            keys = jax.random.split(key, 5)
             params = {
                 "l_raw":     params["l_raw"]     + jax.random.normal(keys[0], (3,)) * self.morph_init_scale,
-                "theta_raw": params["theta_raw"] + jax.random.normal(keys[1], (3,)) * self.morph_init_scale,
-                "phi_raw":   params["phi_raw"]   + jax.random.normal(keys[2], (3,)) * self.morph_init_scale,
-                "alpha_raw": params["alpha_raw"] + jax.random.normal(keys[3], (3,)) * self.morph_init_scale,
+                "psi_raw":   params["psi_raw"]   + jax.random.normal(keys[1], (3,)) * self.morph_init_scale,
+                "theta_raw": params["theta_raw"] + jax.random.normal(keys[2], (3,)) * self.morph_init_scale,
+                "phi_raw":   params["phi_raw"]   + jax.random.normal(keys[3], (3,)) * self.morph_init_scale,
+                "alpha_raw": params["alpha_raw"] + jax.random.normal(keys[4], (3,)) * self.morph_init_scale,
             }
         return params
 
     def get_l(self, morph_params: dict) -> jnp.ndarray:
         return self.l_min + (self.l_max - self.l_min) * jax.nn.sigmoid(morph_params["l_raw"])
+    
+    def get_psi(self, morph_params: dict) -> jnp.ndarray:
+        return self.psi_min + (self.psi_max - self.psi_min) * jax.nn.sigmoid(morph_params["psi_raw"])
 
     def get_theta(self, morph_params: dict) -> jnp.ndarray:
         return self.theta_min + (self.theta_max - self.theta_min) * jax.nn.sigmoid(morph_params["theta_raw"])
@@ -443,11 +452,13 @@ class Navigate:
 
     def get_morph_info(self, morph_params: dict) -> dict:
         l     = self.get_l(morph_params)
+        psi   = self.get_psi(morph_params)
         theta = self.get_theta(morph_params)
         phi   = self.get_phi(morph_params)
         alpha = self.get_alpha(morph_params)
         return {
             "l1": float(l[0]),         "l2": float(l[1]),         "l3": float(l[2]),
+            "psi1": float(psi[0]),     "psi2": float(psi[1]),     "psi3": float(psi[2]),
             "theta1": float(theta[0]), "theta2": float(theta[1]), "theta3": float(theta[2]),
             "phi1": float(phi[0]),     "phi2": float(phi[1]),     "phi3": float(phi[2]),
             "alpha1": float(alpha[0]),     "alpha2": float(alpha[1]),     "alpha3": float(alpha[2]),

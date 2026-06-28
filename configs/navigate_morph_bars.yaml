@@ -5,7 +5,7 @@ env:
   name: navigate
   integrator: semi_implicit_euler
   train_morphology: true
-  morph_init_scale: 0.4
+  morph_init_scale: 0.5
   alternating_phi: false
   phi_default: 0.0
   grad_decay: 0.4
@@ -40,7 +40,7 @@ env:
   # ---- Scene (random obstacles) -----------------------------------------
   # Path to a scene YAML in scene/ — or replace with an inline dict.
   # scene: scene/obstacles_dense.yaml
-  scene: scene/columns.yaml
+  scene: scene/bars.yaml
 
 
 # -----------------------------------------------------------------------
