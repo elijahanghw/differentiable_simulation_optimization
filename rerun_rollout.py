@@ -167,7 +167,149 @@ def _quat_z_to_axis(axes):
     return np.array(quats, dtype=np.float32)
 
 
-def _log_scene(scene_cfg, scene_array):
+def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_max):
+    """
+    Enumerate all procedural obstacles in an x/y bounding region.
+    Pure Python + JAX (not jitted) — only called once for visualization.
+
+    Key split order matches scene.py get_local_obstacles (17 keys):
+      0-3:  sphere cx, cy, cz, r
+      4-9:  box cx, cy, cz, hx, hy, hz
+      10-16: capsule cx, cy, cz, theta, phi, hh, r
+
+    Returns:
+        box_centers      (N, 3) numpy array
+        box_half_extents (N, 3) numpy array
+        sphere_centers   (N, 3) numpy array
+        sphere_radii     (N,)   numpy array
+        cap_centers      (N, 3) numpy array
+        cap_axes         (N, 3) numpy array
+        cap_hh           (N,)   numpy array
+        cap_radii        (N,)   numpy array
+    """
+    import math as _math
+    cell_size = scene_cfg.cell_size
+    Mb = scene_cfg.boxes_per_cell
+    Ms = scene_cfg.spheres_per_cell
+    Mc = scene_cfg.capsules_per_cell
+
+    ix_min = int(np.floor(x_min / cell_size))
+    ix_max = int(np.floor(x_max / cell_size))
+    iy_min = int(np.floor(y_min / cell_size))
+    iy_max = int(np.floor(y_max / cell_size))
+
+    base_key = jax.random.PRNGKey(int(seed_float))
+
+    all_box_c, all_box_he = [], []
+    all_sph_c, all_sph_r  = [], []
+    all_cap_c, all_cap_ax, all_cap_hh, all_cap_r = [], [], [], []
+
+    for ix in range(ix_min, ix_max + 1):
+        for iy in range(iy_min, iy_max + 1):
+            # Cast via int32 → uint32 so negative cell indices wrap correctly,
+            # matching the jnp.int32 behaviour in scene.py's get_local_obstacles.
+            cell_key = jax.random.fold_in(
+                jax.random.fold_in(base_key, np.uint32(np.int32(ix))),
+                np.uint32(np.int32(iy)),
+            )
+            keys = jax.random.split(cell_key, 17)
+
+            x0, x1 = ix * cell_size, (ix + 1) * cell_size
+            y0, y1 = iy * cell_size, (iy + 1) * cell_size
+
+            # Spheres
+            if Ms > 0:
+                s_cx = jax.random.uniform(keys[0], (Ms,), minval=x0, maxval=x1)
+                s_cy = jax.random.uniform(keys[1], (Ms,), minval=y0, maxval=y1)
+                s_cz = jax.random.uniform(keys[2], (Ms,), minval=scene_cfg.arena_z_min, maxval=scene_cfg.arena_z_max)
+                s_r  = jax.random.uniform(keys[3], (Ms,), minval=scene_cfg.sphere_r_min, maxval=scene_cfg.sphere_r_max)
+                all_sph_c.append(np.stack([np.array(s_cx), np.array(s_cy), np.array(s_cz)], axis=-1))
+                all_sph_r.append(np.array(s_r))
+
+            # Boxes
+            if Mb > 0:
+                cx = jax.random.uniform(keys[4], (Mb,), minval=x0, maxval=x1)
+                cy = jax.random.uniform(keys[5], (Mb,), minval=y0, maxval=y1)
+                cz = jax.random.uniform(keys[6], (Mb,), minval=scene_cfg.arena_z_min, maxval=scene_cfg.arena_z_max)
+                hx = jax.random.uniform(keys[7], (Mb,), minval=scene_cfg.box_hx_min,  maxval=scene_cfg.box_hx_max)
+                hy = jax.random.uniform(keys[8], (Mb,), minval=scene_cfg.box_hy_min,  maxval=scene_cfg.box_hy_max)
+                hz = jax.random.uniform(keys[9], (Mb,), minval=scene_cfg.box_hz_min,  maxval=scene_cfg.box_hz_max)
+                all_box_c.append(np.stack([np.array(cx), np.array(cy), np.array(cz)], axis=-1))
+                all_box_he.append(np.stack([np.array(hx), np.array(hy), np.array(hz)], axis=-1))
+
+            # Capsules
+            if Mc > 0:
+                c_cx  = jax.random.uniform(keys[10], (Mc,), minval=x0, maxval=x1)
+                c_cy  = jax.random.uniform(keys[11], (Mc,), minval=y0, maxval=y1)
+                c_cz  = jax.random.uniform(keys[12], (Mc,), minval=scene_cfg.arena_z_min, maxval=scene_cfg.arena_z_max)
+                theta = jax.random.uniform(keys[13], (Mc,), minval=0.0, maxval=_math.pi)
+                phi   = jax.random.uniform(keys[14], (Mc,), minval=0.0, maxval=2 * _math.pi)
+                c_hh  = jax.random.uniform(keys[15], (Mc,), minval=scene_cfg.capsule_hh_min, maxval=scene_cfg.capsule_hh_max)
+                c_r   = jax.random.uniform(keys[16], (Mc,), minval=scene_cfg.capsule_r_min,  maxval=scene_cfg.capsule_r_max)
+                theta_np, phi_np = np.array(theta), np.array(phi)
+                ax = np.sin(theta_np) * np.cos(phi_np)
+                ay = np.sin(theta_np) * np.sin(phi_np)
+                az = np.cos(theta_np)
+                all_cap_c.append(np.stack([np.array(c_cx), np.array(c_cy), np.array(c_cz)], axis=-1))
+                all_cap_ax.append(np.stack([ax, ay, az], axis=-1))
+                all_cap_hh.append(np.array(c_hh))
+                all_cap_r.append(np.array(c_r))
+
+    _empty3 = np.zeros((0, 3), dtype=np.float32)
+    _empty1 = np.zeros((0,),   dtype=np.float32)
+    return (
+        np.concatenate(all_box_c,  axis=0) if all_box_c  else _empty3,
+        np.concatenate(all_box_he, axis=0) if all_box_he else _empty3,
+        np.concatenate(all_sph_c,  axis=0) if all_sph_c  else _empty3,
+        np.concatenate(all_sph_r,  axis=0) if all_sph_r  else _empty1,
+        np.concatenate(all_cap_c,  axis=0) if all_cap_c  else _empty3,
+        np.concatenate(all_cap_ax, axis=0) if all_cap_ax else _empty3,
+        np.concatenate(all_cap_hh, axis=0) if all_cap_hh else _empty1,
+        np.concatenate(all_cap_r,  axis=0) if all_cap_r  else _empty1,
+    )
+
+
+def _log_scene(scene_cfg, scene_array, traj_positions=None):
+    if scene_cfg.procedural:
+        # Derive the region to visualize from the trajectory bounding box,
+        # extended by one cell on each side so the drone's full view is covered.
+        buf  = scene_cfg.cell_size
+        seed = float(scene_array[0])
+        xs, ys = traj_positions[:, 0], traj_positions[:, 1]
+        x_min, x_max = float(xs.min()) - buf, float(xs.max()) + buf
+        y_min, y_max = float(ys.min()) - buf, float(ys.max()) + buf
+
+        cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
+        hx, hy = (x_max - x_min) / 2 + 1.0, (y_max - y_min) / 2 + 1.0
+        rr.log("world/ground", rr.Boxes3D(
+            centers=[[cx, cy, 0.02]], half_sizes=[[hx, hy, 0.02]],
+            colors=[[130, 130, 130, 255]], fill_mode="solid",
+        ), static=True)
+
+        bc, bhe, sc, sr, cap_c, cap_ax, cap_hh, cap_r = _get_all_obstacles_for_region(
+            scene_cfg, seed, x_min, x_max, y_min, y_max
+        )
+        if bc.shape[0] > 0:
+            rr.log("world/boxes", rr.Boxes3D(
+                centers=bc, half_sizes=bhe, colors=[[60, 100, 220, 200]], fill_mode="solid",
+            ), static=True)
+        if sc.shape[0] > 0:
+            rr.log("world/spheres", rr.Ellipsoids3D(
+                centers=sc, half_sizes=np.stack([sr, sr, sr], axis=-1),
+                colors=[[220, 100, 60, 200]], fill_mode="solid",
+            ), static=True)
+        if cap_c.shape[0] > 0:
+            for i in range(cap_c.shape[0]):
+                a = cap_c[i] - cap_hh[i] * cap_ax[i]
+                b = cap_c[i] + cap_hh[i] * cap_ax[i]
+                rr.log(f"world/capsules/{i}", rr.Capsules3D(
+                    lengths=np.array([cap_hh[i] * 2]),
+                    radii=np.array([cap_r[i]]),
+                    translations=np.array([(a + b) / 2]),
+                    rotation_axis_angles=None,
+                ), static=True)
+        return
+
     arrays = scene_cfg.unpack(scene_array)
 
     cx = (scene_cfg.arena_x_min + scene_cfg.arena_x_max) / 2
@@ -291,7 +433,7 @@ def main():
     rr.log("/", rr.ViewCoordinates.FRD, static=True)
 
     if hasattr(env, "scene_cfg"):
-        _log_scene(env.scene_cfg, states[0][22:])
+        _log_scene(env.scene_cfg, states[0][22:], traj_positions=states[:, 0:3])
         rr.log("world/target", rr.Points3D(
             [states[0][19:22]], colors=[[255, 215, 0]], radii=0.15,
         ), static=True)

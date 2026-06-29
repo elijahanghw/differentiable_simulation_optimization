@@ -1,12 +1,10 @@
-# Columns — Tall boxes.
-arena_x_min:  1.5
-arena_x_max:  8.5
-arena_y_min: -3.0
-arena_y_max:  3.0
+# Columns — Tall boxes, procedural infinite world.
+# Cell size is set automatically to cam_max_range at runtime.
+# K = 9 × boxes_per_cell boxes are loaded per step (3×3 cell neighborhood).
 arena_z_min: -1.0
 arena_z_max: 0.0
 
-n_boxes:    25
+boxes_per_cell: 2
 
 box_hx_min: 0.05
 box_hx_max: 0.20

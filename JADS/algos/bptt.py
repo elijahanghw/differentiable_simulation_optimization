@@ -222,6 +222,12 @@ def train(config: Dict[str, Any]) -> Any:
         print(f"Optim        : Adam lr={lr}→{lr_min}  grad_clip={grad_clip}")
     print("-" * 60)
 
+    # -- Debug flags --------------------------------------------------------
+    if tcfg.get("debug_nans", False):
+        jax.config.update("jax_debug_nans", True)
+        jax.config.update("jax_disable_jit", True)
+        print("WARNING: jax_debug_nans + jax_disable_jit enabled — training will be very slow")
+
     # -- Persistent XLA compilation cache ----------------------------------
     _cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".jax_cache")
     os.makedirs(os.path.abspath(_cache_dir), exist_ok=True)
