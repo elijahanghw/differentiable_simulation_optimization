@@ -199,15 +199,32 @@ class SceneConfig:
         (sphere_centers, sphere_radii,
          box_centers, box_half_extents,
          cap_centers, cap_axes, cap_hh, cap_radii) = results
+
+        sph_c  = sphere_centers.reshape(9 * Ms, 3)
+        sph_r  = sphere_radii.reshape(9 * Ms)
+        cap_c  = cap_centers.reshape(9 * Mc, 3)
+        cap_ax = cap_axes.reshape(9 * Mc, 3)
+        cap_hh = cap_hh.reshape(9 * Mc)
+        cap_r  = cap_radii.reshape(9 * Mc)
+
+        # Add capsule endpoint spheres so sphere_centers matches the static-mode
+        # convention: sample() concatenates cap_a / cap_b there, so unpack() and
+        # the renderer always find closed capsules in the sphere array.
+        if Mc > 0:
+            cap_a = cap_c - cap_hh[:, None] * cap_ax
+            cap_b = cap_c + cap_hh[:, None] * cap_ax
+            sph_c = jnp.concatenate([sph_c, cap_a, cap_b], axis=0)
+            sph_r = jnp.concatenate([sph_r, cap_r, cap_r], axis=0)
+
         return (
-            sphere_centers.reshape(9 * Ms, 3),
-            sphere_radii.reshape(9 * Ms),
+            sph_c,
+            sph_r,
             box_centers.reshape(9 * Mb, 3),
             box_half_extents.reshape(9 * Mb, 3),
-            cap_centers.reshape(9 * Mc, 3),
-            cap_axes.reshape(9 * Mc, 3),
-            cap_hh.reshape(9 * Mc),
-            cap_radii.reshape(9 * Mc),
+            cap_c,
+            cap_ax,
+            cap_hh,
+            cap_r,
         )
 
     # -----------------------------------------------------------------------

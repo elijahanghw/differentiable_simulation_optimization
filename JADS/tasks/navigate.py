@@ -211,7 +211,7 @@ class Navigate:
              cap_centers, cap_axes, cap_hh, cap_radii) = self.scene_cfg.get_local_obstacles(
                 state[0:3], state[22]
             )
-            return {
+            return jax.lax.stop_gradient({
                 "sphere_centers":    sphere_centers,
                 "sphere_radii":      sphere_radii,
                 "box_centers":       box_centers,
@@ -220,7 +220,7 @@ class Navigate:
                 "cylinder_axes":     cap_axes,
                 "cylinder_hh":       cap_hh,
                 "cylinder_radii":    cap_radii,
-            }
+            })
         return self.scene_cfg.unpack(state[22:])
 
     def _get_depth(self, state: jnp.ndarray) -> jnp.ndarray:
