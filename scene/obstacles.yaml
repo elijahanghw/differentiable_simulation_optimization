@@ -2,26 +2,26 @@
 # Cell size is set automatically to cam_max_range at runtime.
 # K = 9 × (boxes + spheres + capsules per cell) obstacles loaded per step.
 arena_z_min: -4.0
-arena_z_max: -0.5
+arena_z_max: 0.0
 
 boxes_per_cell:    1
-spheres_per_cell:  1
+spheres_per_cell:  2
 capsules_per_cell: 1
 
-sphere_r_min: 0.10
-sphere_r_max: 0.50
+sphere_r_min: 0.20
+sphere_r_max: 0.60
 
-box_hx_min: 0.10
-box_hx_max: 0.50
-box_hy_min: 0.10
-box_hy_max: 0.50
-box_hz_min: 0.10
-box_hz_max: 0.50
+box_hx_min: 0.20
+box_hx_max: 0.60
+box_hy_min: 0.20
+box_hy_max: 0.60
+box_hz_min: 0.20
+box_hz_max: 0.60
 
-capsule_r_min: 0.10
+capsule_r_min: 0.05
 capsule_r_max: 0.30
-capsule_hh_min: 0.20
-capsule_hh_max: 0.30
+capsule_hh_min: 0.50
+capsule_hh_max: 1.20
 
 
 # arena_x_min:  0.0

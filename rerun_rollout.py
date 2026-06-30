@@ -299,15 +299,14 @@ def _log_scene(scene_cfg, scene_array, traj_positions=None):
                 colors=[[220, 100, 60, 200]], fill_mode="solid",
             ), static=True)
         if cap_c.shape[0] > 0:
-            for i in range(cap_c.shape[0]):
-                a = cap_c[i] - cap_hh[i] * cap_ax[i]
-                b = cap_c[i] + cap_hh[i] * cap_ax[i]
-                rr.log(f"world/capsules/{i}", rr.Capsules3D(
-                    lengths=np.array([cap_hh[i] * 2]),
-                    radii=np.array([cap_r[i]]),
-                    translations=np.array([(a + b) / 2]),
-                    rotation_axis_angles=None,
-                ), static=True)
+            rr.log("world/capsules", rr.Capsules3D(
+                lengths=(cap_hh * 2).astype(np.float32),
+                radii=cap_r.astype(np.float32),
+                translations=(cap_c - cap_hh[:, None] * cap_ax).astype(np.float32),
+                quaternions=_quat_z_to_axis(cap_ax),
+                colors=[[60, 200, 100, 200]],
+                fill_mode="solid",
+            ), static=True)
         return
 
     arrays = scene_cfg.unpack(scene_array)

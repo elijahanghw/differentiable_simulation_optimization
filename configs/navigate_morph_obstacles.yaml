@@ -72,7 +72,6 @@ training:
   morph_lr_min: 1.0e-3
   grad_clip: 1.0
   log_interval: 10
-  debug_nans: false
 
 # -----------------------------------------------------------------------
 # Depth camera
