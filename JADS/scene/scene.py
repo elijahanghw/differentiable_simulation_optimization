@@ -3,18 +3,21 @@ scene.py — Scene generation for the Navigate environment.
 
 Two modes, selected by the YAML config:
 
-  STATIC mode  (n_spheres / n_boxes / n_capsules / n_windows > 0)
+  STATIC mode  (n_spheres / n_boxes / n_capsules / n_windows / n_trees > 0)
     scene_array = cfg.sample(key)      → flat float32 array of shape (scene_dim,)
     scene_dict  = cfg.unpack(arr)      → structured arrays for the renderer
 
-    The flat layout (Ns_t = n_spheres + 2*n_capsules, Nb_t = n_boxes + 4*n_windows):
+    The flat layout (Ns_t = n_spheres + 2*(n_capsules + 4*n_trees),
+                     Nb_t = n_boxes + 4*n_windows,
+                     Nc_t = n_capsules + 4*n_trees):
       [0              : Ns_t*3         ]  sphere centres   (Ns_t, 3)
       [Ns_t*3         : Ns_t*4         ]  sphere radii     (Ns_t,)
       [Ns_t*4         : Ns_t*4+Nb_t*3  ]  box centres      (Nb_t, 3)
       [Ns_t*4+Nb_t*3  : Ns_t*4+Nb_t*6  ]  box half-extents (Nb_t, 3)
-      [Ns_t*4+Nb_t*6  : ...]              cylinder params  (Nc, 8)
+      [Ns_t*4+Nb_t*6  : ...]              cylinder params  (Nc_t, 8)
 
-  PROCEDURAL mode  (boxes_per_cell / spheres_per_cell / capsules_per_cell > 0)
+  PROCEDURAL mode  (boxes_per_cell / spheres_per_cell / capsules_per_cell /
+                    trees_per_cell > 0)
     Obstacles are generated on-the-fly each step from the drone position and
     a per-episode seed.  The world is infinite: the same (seed, cell) always
     produces the same obstacles, so the scene is consistent across timesteps.
@@ -24,12 +27,22 @@ Two modes, selected by the YAML config:
      box_c, box_he,
      cap_c, cap_ax, cap_hh, cap_r) = cfg.get_local_obstacles(drone_pos, seed_float)
 
-    K_s = 9 × spheres_per_cell, K_b = 9 × boxes_per_cell, K_c = 9 × capsules_per_cell
+    K_s = 9 × spheres_per_cell, K_b = 9 × boxes_per_cell,
+    K_c = 9 × (capsules_per_cell + 4*trees_per_cell)
 
     Cell size is set to cam_max_range by Navigate.__init__ after construction.
     A 3×3 grid of cells centered on the drone's current cell is loaded;
     this always covers the full camera frustum regardless of drone position
     within its cell.
+
+  TREES (composite obstacle)
+    Each tree consists of 4 capsules:
+      - 1 vertical trunk rooted at z=0 (ground), growing upward (−z in NED)
+      - 3 branches starting at the trunk top, fanning out 120° apart at
+        tree_branch_tilt radians from the vertical, with a random per-tree
+        azimuth offset so no two trees look identical.
+    Trees are implemented as additional capsules appended to the capsule arrays;
+    the renderer sees only capsules (+ their auto-generated end-cap spheres).
 """
 
 from __future__ import annotations
@@ -45,15 +58,16 @@ class SceneConfig:
     """
     All parameters controlling obstacle generation.
 
-    Set any of boxes_per_cell / spheres_per_cell / capsules_per_cell > 0 to
-    enable procedural infinite-world mode.  Otherwise, set
-    n_spheres / n_boxes / n_capsules / n_windows for static-scene mode.
+    Set any of boxes_per_cell / spheres_per_cell / capsules_per_cell /
+    trees_per_cell > 0 to enable procedural infinite-world mode.  Otherwise,
+    set n_spheres / n_boxes / n_capsules / n_windows / n_trees for static mode.
     """
 
     # ---- Procedural mode ---------------------------------------------------
     boxes_per_cell:    int   = 0     # boxes per cell  }
     spheres_per_cell:  int   = 0     # spheres per cell } any >0 → procedural mode
     capsules_per_cell: int   = 0     # capsules per cell}
+    trees_per_cell:    int   = 0     # trees per cell   }
     cell_size:         float = 8.0   # set to cam_max_range by Navigate.__init__
 
     # ---- Arena (static mode spawn bounds / procedural z bounds) ------------
@@ -66,6 +80,7 @@ class SceneConfig:
     n_boxes:    int = 0
     n_capsules: int = 0
     n_windows:  int = 0
+    n_trees:    int = 0
 
     # ---- Sphere size bounds ------------------------------------------------
     sphere_r_min: float = 0.15;  sphere_r_max: float = 0.60
@@ -86,6 +101,16 @@ class SceneConfig:
     window_border:    float = 0.5
     window_depth:     float = 0.2
 
+    # ---- Tree obstacles (composite: 1 trunk + 3 branches, all capsules) ----
+    # Trunk: vertical capsule, base at z=0 (ground), grows upward (−z in NED).
+    # Branches: start at trunk top, fan out 120° apart at tree_branch_tilt
+    #           radians from the vertical, random per-tree azimuth offset.
+    tree_trunk_r_min:   float = 0.05;  tree_trunk_r_max:   float = 0.12
+    tree_trunk_hh_min:  float = 0.60;  tree_trunk_hh_max:  float = 1.50
+    tree_branch_r_min:  float = 0.03;  tree_branch_r_max:  float = 0.06
+    tree_branch_hh_min: float = 0.30;  tree_branch_hh_max: float = 0.70
+    tree_branch_tilt:   float = 0.70   # radians from vertical, ~40°
+
     scene_dim: int = _field(init=False, repr=True)
     procedural: bool = _field(init=False, repr=True)
 
@@ -93,14 +118,17 @@ class SceneConfig:
         self.procedural = (
             self.boxes_per_cell > 0 or
             self.spheres_per_cell > 0 or
-            self.capsules_per_cell > 0
+            self.capsules_per_cell > 0 or
+            self.trees_per_cell > 0
         )
         if self.procedural:
             self.scene_dim = 1  # only the seed float
         else:
-            Ns, Nb, Nc, Nw = self.n_spheres, self.n_boxes, self.n_capsules, self.n_windows
-            Ns_t = Ns + 2 * Nc
-            self.scene_dim = Ns_t * 4 + (Nb + 4 * Nw) * 6 + Nc * 8
+            Ns, Nb, Nc, Nw, Nt = (self.n_spheres, self.n_boxes,
+                                    self.n_capsules, self.n_windows, self.n_trees)
+            Nc_t = Nc + 4 * Nt          # standalone capsules + tree capsules
+            Ns_t = Ns + 2 * Nc_t        # spheres + capsule end-caps
+            self.scene_dim = Ns_t * 4 + (Nb + 4 * Nw) * 6 + Nc_t * 8
 
     # -----------------------------------------------------------------------
     # Procedural mode
@@ -117,24 +145,28 @@ class SceneConfig:
         The same (seed, cell_ix, cell_iy) always produces identical obstacles,
         so the scene is persistent across timesteps without storing positions.
 
-        Key split order per cell (17 total):
+        Key split order per cell (17 total for spheres/boxes/capsules):
           0-3:  sphere cx, cy, cz, r
           4-9:  box cx, cy, cz, hx, hy, hz
           10-16: capsule cx, cy, cz, theta, phi, hh, r
+        Trees use a separate key derived via fold_in(cell_key, 1000) for
+        backward compatibility with existing scenes (sphere/box/capsule
+        randomisation is unchanged when trees_per_cell=0).
 
         Returns:
-            sphere_centers   (9*spheres_per_cell, 3) float32
-            sphere_radii     (9*spheres_per_cell,)   float32
-            box_centers      (9*boxes_per_cell, 3)   float32
-            box_half_extents (9*boxes_per_cell, 3)   float32
-            cap_centers      (9*capsules_per_cell, 3) float32
-            cap_axes         (9*capsules_per_cell, 3) float32
-            cap_hh           (9*capsules_per_cell,)   float32
-            cap_radii        (9*capsules_per_cell,)   float32
+            sphere_centers   (9*(spheres_per_cell + 2*(capsules_per_cell + 4*trees_per_cell)), 3)
+            sphere_radii     same length, float32
+            box_centers      (9*boxes_per_cell, 3)
+            box_half_extents (9*boxes_per_cell, 3)
+            cap_centers      (9*(capsules_per_cell + 4*trees_per_cell), 3)
+            cap_axes         same shape
+            cap_hh           (9*(capsules_per_cell + 4*trees_per_cell),)
+            cap_radii        same length
         """
         Ms        = self.spheres_per_cell
         Mb        = self.boxes_per_cell
         Mc        = self.capsules_per_cell
+        Mt        = self.trees_per_cell
         cell_size = self.cell_size
 
         ix_c = jnp.floor(drone_pos[0] / cell_size).astype(jnp.int32)
@@ -191,14 +223,60 @@ class SceneConfig:
                                      jnp.cos(theta)], axis=-1)  # (Mc, 3)
             cap_centers = jnp.stack([c_cx, c_cy, c_cz], axis=-1)  # (Mc, 3)
 
+            # Trees — separate key stream so existing capsule/sphere/box
+            # randomisation is unchanged when trees_per_cell=0.
+            tree_key = jax.random.fold_in(cell_key, 1000)
+            tkeys   = jax.random.split(tree_key, 7)
+
+            t_cx         = jax.random.uniform(tkeys[0], (Mt,), minval=x_min, maxval=x_max)
+            t_cy         = jax.random.uniform(tkeys[1], (Mt,), minval=y_min, maxval=y_max)
+            t_trunk_hh   = jax.random.uniform(tkeys[2], (Mt,), minval=self.tree_trunk_hh_min,  maxval=self.tree_trunk_hh_max)
+            t_trunk_r    = jax.random.uniform(tkeys[3], (Mt,), minval=self.tree_trunk_r_min,   maxval=self.tree_trunk_r_max)
+            t_branch_hh  = jax.random.uniform(tkeys[4], (Mt,), minval=self.tree_branch_hh_min, maxval=self.tree_branch_hh_max)
+            t_branch_r   = jax.random.uniform(tkeys[5], (Mt,), minval=self.tree_branch_r_min,  maxval=self.tree_branch_r_max)
+            phi_off      = jax.random.uniform(tkeys[6], (Mt,), minval=0.0, maxval=2*math.pi/3)
+
+            # Trunk: vertical capsule, base at z=0, axis = (0, 0, 1) in NED
+            trunk_centers = jnp.stack([t_cx, t_cy, -t_trunk_hh], axis=-1)   # (Mt, 3)
+            trunk_axes    = jnp.zeros((Mt, 3)).at[:, 2].set(1.0)             # (Mt, 3)
+
+            # Branches: 3 per tree at 120° azimuth spacing, tilted from vertical
+            phis = jnp.stack(
+                [phi_off, phi_off + 2*math.pi/3, phi_off + 4*math.pi/3], axis=-1
+            )  # (Mt, 3)
+            sin_t, cos_t = math.sin(self.tree_branch_tilt), math.cos(self.tree_branch_tilt)
+            b_ax_x = sin_t * jnp.cos(phis)          # (Mt, 3)
+            b_ax_y = sin_t * jnp.sin(phis)          # (Mt, 3)
+            b_ax_z = jnp.full_like(b_ax_x, -cos_t)  # (Mt, 3) — upward in NED (−z)
+            branch_axes = jnp.stack([b_ax_x, b_ax_y, b_ax_z], axis=-1)  # (Mt, 3, 3)
+
+            # Branch centers: start at trunk top, extend along branch axis
+            trunk_tops = jnp.stack([t_cx, t_cy, -2.0 * t_trunk_hh], axis=-1)  # (Mt, 3)
+            branch_centers = (                             # (Mt, 3, 3)
+                trunk_tops[:, None, :]
+                + t_branch_hh[:, None, None] * branch_axes
+            )
+
+            b_centers_flat = branch_centers.reshape(3 * Mt, 3)   # (3*Mt, 3)
+            b_axes_flat    = branch_axes.reshape(3 * Mt, 3)       # (3*Mt, 3)
+            b_hh_flat      = jnp.repeat(t_branch_hh, 3)          # (3*Mt,)
+            b_r_flat       = jnp.repeat(t_branch_r,  3)          # (3*Mt,)
+
+            tree_cap_c  = jnp.concatenate([trunk_centers,  b_centers_flat], axis=0)  # (4*Mt, 3)
+            tree_cap_ax = jnp.concatenate([trunk_axes,     b_axes_flat],    axis=0)  # (4*Mt, 3)
+            tree_cap_hh = jnp.concatenate([t_trunk_hh,    b_hh_flat])                # (4*Mt,)
+            tree_cap_r  = jnp.concatenate([t_trunk_r,     b_r_flat])                 # (4*Mt,)
+
             return (sphere_centers, sphere_radii,
                     box_centers, box_half_extents,
-                    cap_centers, cap_axes, c_hh, c_r)
+                    cap_centers, cap_axes, c_hh, c_r,
+                    tree_cap_c, tree_cap_ax, tree_cap_hh, tree_cap_r)
 
         results = jax.vmap(sample_cell)(offsets)  # each element has leading dim 9
         (sphere_centers, sphere_radii,
          box_centers, box_half_extents,
-         cap_centers, cap_axes, cap_hh, cap_radii) = results
+         cap_centers, cap_axes, cap_hh, cap_radii,
+         tree_cap_centers, tree_cap_axes, tree_cap_hh, tree_cap_radii) = results
 
         sph_c  = sphere_centers.reshape(9 * Ms, 3)
         sph_r  = sphere_radii.reshape(9 * Ms)
@@ -206,25 +284,33 @@ class SceneConfig:
         cap_ax = cap_axes.reshape(9 * Mc, 3)
         cap_hh = cap_hh.reshape(9 * Mc)
         cap_r  = cap_radii.reshape(9 * Mc)
+        tree_c  = tree_cap_centers.reshape(9 * 4 * Mt, 3)
+        tree_ax = tree_cap_axes.reshape(9 * 4 * Mt, 3)
+        tree_hh = tree_cap_hh.reshape(9 * 4 * Mt)
+        tree_r  = tree_cap_radii.reshape(9 * 4 * Mt)
 
-        # Add capsule endpoint spheres so sphere_centers matches the static-mode
-        # convention: sample() concatenates cap_a / cap_b there, so unpack() and
-        # the renderer always find closed capsules in the sphere array.
-        if Mc > 0:
-            cap_a = cap_c - cap_hh[:, None] * cap_ax
-            cap_b = cap_c + cap_hh[:, None] * cap_ax
+        # Merge standalone capsules and tree capsules into unified arrays
+        all_cap_c  = jnp.concatenate([cap_c,  tree_c],  axis=0)
+        all_cap_ax = jnp.concatenate([cap_ax, tree_ax], axis=0)
+        all_cap_hh = jnp.concatenate([cap_hh, tree_hh])
+        all_cap_r  = jnp.concatenate([cap_r,  tree_r])
+
+        # Add end-cap spheres for all capsules (standalone + tree)
+        if Mc > 0 or Mt > 0:
+            cap_a = all_cap_c - all_cap_hh[:, None] * all_cap_ax
+            cap_b = all_cap_c + all_cap_hh[:, None] * all_cap_ax
             sph_c = jnp.concatenate([sph_c, cap_a, cap_b], axis=0)
-            sph_r = jnp.concatenate([sph_r, cap_r, cap_r], axis=0)
+            sph_r = jnp.concatenate([sph_r, all_cap_r, all_cap_r], axis=0)
 
         return (
             sph_c,
             sph_r,
             box_centers.reshape(9 * Mb, 3),
             box_half_extents.reshape(9 * Mb, 3),
-            cap_c,
-            cap_ax,
-            cap_hh,
-            cap_r,
+            all_cap_c,
+            all_cap_ax,
+            all_cap_hh,
+            all_cap_r,
         )
 
     # -----------------------------------------------------------------------
@@ -240,7 +326,7 @@ class SceneConfig:
             seed_int = jax.random.randint(key, shape=(), minval=0, maxval=2**23, dtype=jnp.int32)
             return jnp.array([seed_int], dtype=jnp.float32)
 
-        Ns, Nb, Nc = self.n_spheres, self.n_boxes, self.n_capsules
+        Ns, Nb, Nc, Nt = self.n_spheres, self.n_boxes, self.n_capsules, self.n_trees
 
         k = jax.random.split(key, 17)
         i = 0
@@ -282,14 +368,67 @@ class SceneConfig:
         c_r  = jax.random.uniform(k[i], shape=(Nc,), minval=self.capsule_r_min,  maxval=self.capsule_r_max); i+=1
 
         c_centers = jnp.stack([c_cx, c_cy, c_cz], axis=-1)
-        cap_a = c_centers - c_hh[:, None] * axes
-        cap_b = c_centers + c_hh[:, None] * axes
 
+        # ---- Trees ---------------------------------------------------------
+        # Separate key stream (fold_in) so existing capsule/box/sphere
+        # randomisation is unchanged when n_trees=0.
+        if Nt > 0:
+            k_tree = jax.random.split(jax.random.fold_in(key, 1000), 7)
+
+            t_x         = jax.random.uniform(k_tree[0], (Nt,), minval=self.arena_x_min,      maxval=self.arena_x_max)
+            t_y         = jax.random.uniform(k_tree[1], (Nt,), minval=self.arena_y_min,      maxval=self.arena_y_max)
+            t_trunk_hh  = jax.random.uniform(k_tree[2], (Nt,), minval=self.tree_trunk_hh_min, maxval=self.tree_trunk_hh_max)
+            t_trunk_r   = jax.random.uniform(k_tree[3], (Nt,), minval=self.tree_trunk_r_min,  maxval=self.tree_trunk_r_max)
+            t_branch_hh = jax.random.uniform(k_tree[4], (Nt,), minval=self.tree_branch_hh_min,maxval=self.tree_branch_hh_max)
+            t_branch_r  = jax.random.uniform(k_tree[5], (Nt,), minval=self.tree_branch_r_min, maxval=self.tree_branch_r_max)
+            phi_off     = jax.random.uniform(k_tree[6], (Nt,), minval=0.0, maxval=2*math.pi/3)
+
+            # Trunk: vertical capsule, base at z=0 (ground in NED)
+            trunk_centers = jnp.stack([t_x, t_y, -t_trunk_hh], axis=-1)   # (Nt, 3)
+            trunk_axes    = jnp.zeros((Nt, 3)).at[:, 2].set(1.0)           # (Nt, 3)
+
+            # Branches: 3 per tree at 120° azimuth spacing
+            phis = jnp.stack(
+                [phi_off, phi_off + 2*math.pi/3, phi_off + 4*math.pi/3], axis=-1
+            )  # (Nt, 3)
+            sin_t = math.sin(self.tree_branch_tilt)
+            cos_t = math.cos(self.tree_branch_tilt)
+            b_ax_x = sin_t * jnp.cos(phis)          # (Nt, 3)
+            b_ax_y = sin_t * jnp.sin(phis)          # (Nt, 3)
+            b_ax_z = jnp.full_like(b_ax_x, -cos_t)  # (Nt, 3) — upward in NED (−z)
+            branch_axes = jnp.stack([b_ax_x, b_ax_y, b_ax_z], axis=-1)  # (Nt, 3, 3)
+
+            trunk_tops = jnp.stack([t_x, t_y, -2.0 * t_trunk_hh], axis=-1)  # (Nt, 3)
+            branch_centers = (                             # (Nt, 3, 3)
+                trunk_tops[:, None, :]
+                + t_branch_hh[:, None, None] * branch_axes
+            )
+
+            b_centers_flat = branch_centers.reshape(3 * Nt, 3)
+            b_axes_flat    = branch_axes.reshape(3 * Nt, 3)
+            b_hh_flat      = jnp.repeat(t_branch_hh, 3)
+            b_r_flat       = jnp.repeat(t_branch_r,  3)
+
+            tree_c  = jnp.concatenate([trunk_centers, b_centers_flat], axis=0)  # (4*Nt, 3)
+            tree_ax = jnp.concatenate([trunk_axes,    b_axes_flat],    axis=0)  # (4*Nt, 3)
+            tree_hh = jnp.concatenate([t_trunk_hh,   b_hh_flat])               # (4*Nt,)
+            tree_r  = jnp.concatenate([t_trunk_r,    b_r_flat])                # (4*Nt,)
+
+            all_cap_c  = jnp.concatenate([c_centers, tree_c],  axis=0)  # (Nc+4*Nt, 3)
+            all_cap_ax = jnp.concatenate([axes,      tree_ax], axis=0)
+            all_cap_hh = jnp.concatenate([c_hh,     tree_hh])
+            all_cap_r  = jnp.concatenate([c_r,      tree_r])
+        else:
+            all_cap_c, all_cap_ax, all_cap_hh, all_cap_r = c_centers, axes, c_hh, c_r
+
+        # End-cap spheres for all capsules (standalone + tree)
+        cap_a = all_cap_c - all_cap_hh[:, None] * all_cap_ax
+        cap_b = all_cap_c + all_cap_hh[:, None] * all_cap_ax
         sphere_centers = jnp.concatenate([sphere_centers, cap_a, cap_b], axis=0)
-        sphere_radii   = jnp.concatenate([sphere_radii,   c_r,   c_r],  axis=0)
+        sphere_radii   = jnp.concatenate([sphere_radii,   all_cap_r, all_cap_r])
 
         cylinder_params = jnp.concatenate([
-            c_centers, axes, c_hh[:, None], c_r[:, None],
+            all_cap_c, all_cap_ax, all_cap_hh[:, None], all_cap_r[:, None],
         ], axis=-1).reshape(-1)
 
         # ---- Windows -------------------------------------------------------
@@ -336,16 +475,16 @@ class SceneConfig:
         Split a flat static-mode scene array into named geometry arrays.
         Not used in procedural mode.
         """
-        Ns_t = self.n_spheres + 2 * self.n_capsules
+        Nc_t = self.n_capsules + 4 * self.n_trees   # total cylinders
+        Ns_t = self.n_spheres + 2 * Nc_t
         Nb_t = self.n_boxes + 4 * self.n_windows
-        Nc   = self.n_capsules
         i = 0
 
         sphere_centers   = scene_array[i : i+Ns_t*3].reshape(Ns_t, 3);  i += Ns_t*3
         sphere_radii     = scene_array[i : i+Ns_t];                       i += Ns_t
         box_centers      = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);   i += Nb_t*3
         box_half_extents = scene_array[i : i+Nb_t*3].reshape(Nb_t, 3);   i += Nb_t*3
-        cylinder_flat    = scene_array[i : i+Nc*8].reshape(Nc, 8)
+        cylinder_flat    = scene_array[i : i+Nc_t*8].reshape(Nc_t, 8)
 
         return {
             "sphere_centers":    sphere_centers,
@@ -363,8 +502,8 @@ class SceneConfig:
             return (
                 f"SceneConfig  procedural  cell_size={self.cell_size:.1f}m  "
                 f"boxes={self.boxes_per_cell}  spheres={self.spheres_per_cell}  "
-                f"capsules={self.capsules_per_cell}  "
-                f"K={9*(self.boxes_per_cell+self.spheres_per_cell+self.capsules_per_cell)}"
+                f"capsules={self.capsules_per_cell}  trees={self.trees_per_cell}  "
+                f"K={9*(self.boxes_per_cell+self.spheres_per_cell+self.capsules_per_cell+4*self.trees_per_cell)}"
             )
         vol = (
             (self.arena_x_max - self.arena_x_min)
@@ -374,5 +513,5 @@ class SceneConfig:
         return (
             f"SceneConfig  static  arena={vol:.1f}m³  "
             f"Ns={self.n_spheres}  Nb={self.n_boxes}  Nc={self.n_capsules}  "
-            f"scene_dim={self.scene_dim}"
+            f"Nt={self.n_trees}  scene_dim={self.scene_dim}"
         )
