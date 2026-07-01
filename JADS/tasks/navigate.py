@@ -10,7 +10,7 @@ from ..scene.scene import SceneConfig
 
 from JADS.depth_render.renderer import render_depth, apply_sensor_noise  # depth_render/renderer.py
 from JADS.depth_render.primitives import (                               # depth_render/primitives.py
-    point_sphere_dist, point_aabb_dist,
+    point_sphere_dist, point_aabb_dist, point_obb_dist,
     point_capsule_dist, point_plane_dist,
 )
 
@@ -209,7 +209,8 @@ class Navigate:
         if self.scene_cfg.procedural:
             (sphere_centers, sphere_radii,
              box_centers, box_half_extents,
-             cap_centers, cap_axes, cap_hh, cap_radii) = self.scene_cfg.get_local_obstacles(
+             cap_centers, cap_axes, cap_hh, cap_radii,
+             obb_centers, obb_quats, obb_he) = self.scene_cfg.get_local_obstacles(
                 state[0:3], state[22]
             )
             return jax.lax.stop_gradient({
@@ -221,6 +222,9 @@ class Navigate:
                 "cylinder_axes":     cap_axes,
                 "cylinder_hh":       cap_hh,
                 "cylinder_radii":    cap_radii,
+                "obb_centers":       obb_centers,
+                "obb_quats":         obb_quats,
+                "obb_half_extents":  obb_he,
             })
         return self.scene_cfg.unpack(state[22:])
 
@@ -252,6 +256,9 @@ class Navigate:
                 cylinder_axes    = arrays["cylinder_axes"],
                 cylinder_hh      = arrays["cylinder_hh"],
                 cylinder_radii   = arrays["cylinder_radii"],
+                obb_centers      = arrays["obb_centers"],
+                obb_quaternions  = arrays["obb_quats"],
+                obb_half_extents = arrays["obb_half_extents"],
             ),
             min_range      = self.cam_min_range,
             max_range      = self.cam_max_range,
@@ -276,6 +283,9 @@ class Navigate:
                 cylinder_axes    = arrays["cylinder_axes"],
                 cylinder_hh      = arrays["cylinder_hh"],
                 cylinder_radii   = arrays["cylinder_radii"],
+                obb_centers      = arrays["obb_centers"],
+                obb_quaternions  = arrays["obb_quats"],
+                obb_half_extents = arrays["obb_half_extents"],
             ),
             min_range      = self.cam_min_range,
             max_range      = self.cam_max_range,
@@ -314,6 +324,10 @@ class Navigate:
                 ds = jax.vmap(lambda c, ax, hh, r: point_capsule_dist(pt, c, ax, hh, r))(
                     arrays["cylinder_centers"], arrays["cylinder_axes"],
                     arrays["cylinder_hh"], arrays["cylinder_radii"])
+                d = jnp.minimum(d, jnp.min(ds))
+            if arrays["obb_centers"].shape[0] > 0:
+                ds = jax.vmap(lambda c, q, he: point_obb_dist(pt, c, q, he))(
+                    arrays["obb_centers"], arrays["obb_quats"], arrays["obb_half_extents"])
                 d = jnp.minimum(d, jnp.min(ds))
             return d
 

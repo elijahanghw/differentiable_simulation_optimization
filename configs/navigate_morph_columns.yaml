@@ -65,7 +65,7 @@ training:
   morphological_loss: true
   morphological_loss_weight: 200.0
   horizon: 250
-  batch_size: 64
+  batch_size: 128
   lr: 1.0e-3
   lr_min: 1.0e-4
   morph_lr: 1.0e-3

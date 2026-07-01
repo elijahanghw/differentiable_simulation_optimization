@@ -177,16 +177,20 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
       4-9:  box cx, cy, cz, hx, hy, hz
       10-16: capsule cx, cy, cz, theta, phi, hh, r
     Trees use fold_in(cell_key, 1000) → 7 keys, matching scene.py exactly.
+    Tree trunks are AABB (merged into boxes); branches are OBB.
 
     Returns:
-        box_centers      (N, 3) numpy array
+        box_centers      (N, 3) numpy array  — includes trunk AABBs
         box_half_extents (N, 3) numpy array
         sphere_centers   (N, 3) numpy array
         sphere_radii     (N,)   numpy array
-        cap_centers      (N, 3) numpy array
+        cap_centers      (N, 3) numpy array  — standalone capsules only
         cap_axes         (N, 3) numpy array
         cap_hh           (N,)   numpy array
         cap_radii        (N,)   numpy array
+        obb_centers      (N, 3) numpy array  — branch OBBs
+        obb_quats        (N, 4) numpy array  — [qx,qy,qz,qw] rerun convention
+        obb_half_extents (N, 3) numpy array
     """
     import math as _math
     cell_size = scene_cfg.cell_size
@@ -205,6 +209,7 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
     all_box_c, all_box_he = [], []
     all_sph_c, all_sph_r  = [], []
     all_cap_c, all_cap_ax, all_cap_hh, all_cap_r = [], [], [], []
+    all_obb_c, all_obb_q, all_obb_he = [], [], []
 
     for ix in range(ix_min, ix_max + 1):
         for iy in range(iy_min, iy_max + 1):
@@ -260,41 +265,48 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
             # Trees — separate key stream via fold_in, matching scene.py exactly
             if Mt > 0:
                 tree_key = jax.random.fold_in(cell_key, 1000)
-                tkeys   = jax.random.split(tree_key, 7)
+                tkeys   = jax.random.split(tree_key, 8)
 
                 t_x         = np.array(jax.random.uniform(tkeys[0], (Mt,), minval=x0, maxval=x1))
                 t_y         = np.array(jax.random.uniform(tkeys[1], (Mt,), minval=y0, maxval=y1))
-                t_trunk_hh  = np.array(jax.random.uniform(tkeys[2], (Mt,), minval=scene_cfg.tree_trunk_hh_min,  maxval=scene_cfg.tree_trunk_hh_max))
-                t_trunk_r   = np.array(jax.random.uniform(tkeys[3], (Mt,), minval=scene_cfg.tree_trunk_r_min,   maxval=scene_cfg.tree_trunk_r_max))
-                t_branch_hh = np.array(jax.random.uniform(tkeys[4], (Mt,), minval=scene_cfg.tree_branch_hh_min, maxval=scene_cfg.tree_branch_hh_max))
-                t_branch_r  = np.array(jax.random.uniform(tkeys[5], (Mt,), minval=scene_cfg.tree_branch_r_min,  maxval=scene_cfg.tree_branch_r_max))
+                t_trunk_hh  = np.array(jax.random.uniform(tkeys[2], (Mt,), minval=scene_cfg.tree_trunk_hh_min,    maxval=scene_cfg.tree_trunk_hh_max))
+                t_trunk_r   = np.array(jax.random.uniform(tkeys[3], (Mt,), minval=scene_cfg.tree_trunk_r_min,     maxval=scene_cfg.tree_trunk_r_max))
+                t_branch_hh = np.array(jax.random.uniform(tkeys[4], (Mt,), minval=scene_cfg.tree_branch_hh_min,  maxval=scene_cfg.tree_branch_hh_max))
+                t_branch_r  = np.array(jax.random.uniform(tkeys[5], (Mt,), minval=scene_cfg.tree_branch_r_min,   maxval=scene_cfg.tree_branch_r_max))
                 phi_off     = np.array(jax.random.uniform(tkeys[6], (Mt,), minval=0.0, maxval=2*_math.pi/3))
+                t_tilt      = np.array(jax.random.uniform(tkeys[7], (Mt,), minval=scene_cfg.tree_branch_tilt_min, maxval=scene_cfg.tree_branch_tilt_max))
 
-                # Trunk: vertical, base at z=0, axis = (0, 0, 1) in NED
-                trunk_c  = np.stack([t_x, t_y, -t_trunk_hh], axis=-1)   # (Mt, 3)
-                trunk_ax = np.zeros((Mt, 3)); trunk_ax[:, 2] = 1.0        # (Mt, 3)
+                # Trunk: AABB merged into box arrays
+                trunk_c  = np.stack([t_x, t_y, -t_trunk_hh], axis=-1)           # (Mt, 3)
+                trunk_he = np.stack([t_trunk_r, t_trunk_r, t_trunk_hh], axis=-1) # (Mt, 3)
+                all_box_c.append(trunk_c)
+                all_box_he.append(trunk_he)
 
-                # Branches: 3 per tree at 120° spacing, tilted from vertical
-                sin_t = _math.sin(scene_cfg.tree_branch_tilt)
-                cos_t = _math.cos(scene_cfg.tree_branch_tilt)
+                # Branches: OBB
+                sin_t = np.sin(t_tilt)  # (Mt,)
+                cos_t = np.cos(t_tilt)  # (Mt,)
                 for b in range(3):
-                    phis_b   = phi_off + b * 2 * _math.pi / 3
-                    b_ax     = np.stack([sin_t * np.cos(phis_b),
-                                         sin_t * np.sin(phis_b),
-                                         np.full(Mt, -cos_t)], axis=-1)   # (Mt, 3)
+                    phis_b    = phi_off + b * 2 * _math.pi / 3
+                    b_ax      = np.stack([sin_t * np.cos(phis_b),
+                                          sin_t * np.sin(phis_b),
+                                          -cos_t], axis=-1)  # (Mt, 3)
                     trunk_top = np.stack([t_x, t_y, -2.0 * t_trunk_hh], axis=-1)
                     b_c       = trunk_top + t_branch_hh[:, None] * b_ax   # (Mt, 3)
-                    all_cap_c.append(b_c)
-                    all_cap_ax.append(b_ax)
-                    all_cap_hh.append(t_branch_hh)
-                    all_cap_r.append(t_branch_r)
-
-                all_cap_c.append(trunk_c)
-                all_cap_ax.append(trunk_ax)
-                all_cap_hh.append(t_trunk_hh)
-                all_cap_r.append(t_trunk_r)
+                    b_he      = np.stack([t_branch_r, t_branch_r, t_branch_hh], axis=-1)
+                    # Quaternion: rotate [0,0,1] → branch axis (half-angle, rerun uses [qx,qy,qz,qw])
+                    bz   = b_ax[:, 2]
+                    norm = np.sqrt(np.maximum(2.0 * (1.0 + bz), 1e-8))
+                    qw = (1.0 + bz) / norm
+                    qx = -b_ax[:, 1] / norm
+                    qy =  b_ax[:, 0] / norm
+                    qz = np.zeros_like(bz)
+                    b_q = np.stack([qx, qy, qz, qw], axis=-1)  # rerun: [qx,qy,qz,qw]
+                    all_obb_c.append(b_c)
+                    all_obb_q.append(b_q)
+                    all_obb_he.append(b_he)
 
     _empty3 = np.zeros((0, 3), dtype=np.float32)
+    _empty4 = np.zeros((0, 4), dtype=np.float32)
     _empty1 = np.zeros((0,),   dtype=np.float32)
     return (
         np.concatenate(all_box_c,  axis=0) if all_box_c  else _empty3,
@@ -305,6 +317,9 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
         np.concatenate(all_cap_ax, axis=0) if all_cap_ax else _empty3,
         np.concatenate(all_cap_hh, axis=0) if all_cap_hh else _empty1,
         np.concatenate(all_cap_r,  axis=0) if all_cap_r  else _empty1,
+        np.concatenate(all_obb_c,  axis=0) if all_obb_c  else _empty3,
+        np.concatenate(all_obb_q,  axis=0) if all_obb_q  else _empty4,
+        np.concatenate(all_obb_he, axis=0) if all_obb_he else _empty3,
     )
 
 
@@ -325,9 +340,8 @@ def _log_scene(scene_cfg, scene_array, traj_positions=None):
             colors=[[130, 130, 130, 255]], fill_mode="solid",
         ), static=True)
 
-        bc, bhe, sc, sr, cap_c, cap_ax, cap_hh, cap_r = _get_all_obstacles_for_region(
-            scene_cfg, seed, x_min, x_max, y_min, y_max
-        )
+        bc, bhe, sc, sr, cap_c, cap_ax, cap_hh, cap_r, obb_c, obb_q, obb_he = \
+            _get_all_obstacles_for_region(scene_cfg, seed, x_min, x_max, y_min, y_max)
         if bc.shape[0] > 0:
             rr.log("world/boxes", rr.Boxes3D(
                 centers=bc, half_sizes=bhe, colors=[[60, 100, 220, 200]], fill_mode="solid",
@@ -345,6 +359,11 @@ def _log_scene(scene_cfg, scene_array, traj_positions=None):
                 quaternions=_quat_z_to_axis(cap_ax),
                 colors=[[60, 200, 100, 200]],
                 fill_mode="solid",
+            ), static=True)
+        if obb_c.shape[0] > 0:
+            rr.log("world/branches", rr.Boxes3D(
+                centers=obb_c, half_sizes=obb_he, quaternions=obb_q,
+                colors=[[60, 200, 100, 200]], fill_mode="solid",
             ), static=True)
         return
 
@@ -378,6 +397,15 @@ def _log_scene(scene_cfg, scene_array, traj_positions=None):
         rr.log("world/capsules", rr.Capsules3D(
             lengths=(2.0 * chh).astype(np.float32), radii=cr.astype(np.float32),
             translations=cc - ca * chh[:, None], quaternions=_quat_z_to_axis(ca),
+            colors=[[60, 200, 100, 200]], fill_mode="solid",
+        ), static=True)
+    obb_c  = np.array(arrays["obb_centers"])
+    obb_q  = np.array(arrays["obb_quats"])    # scene.py stores [qw,qx,qy,qz]; rerun uses [qx,qy,qz,qw]
+    obb_he = np.array(arrays["obb_half_extents"])
+    if obb_c.shape[0] > 0:
+        obb_q_rr = obb_q[:, [1, 2, 3, 0]]   # reorder to rerun's [qx,qy,qz,qw]
+        rr.log("world/branches", rr.Boxes3D(
+            centers=obb_c, half_sizes=obb_he, quaternions=obb_q_rr,
             colors=[[60, 200, 100, 200]], fill_mode="solid",
         ), static=True)
 

@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from .camera     import generate_rays
-from .primitives import ray_sphere, ray_aabb, ray_cylinder, ray_infinite_plane
+from .primitives import ray_sphere, ray_aabb, ray_obb, ray_cylinder, ray_infinite_plane
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +49,9 @@ def render_depth(
     cylinder_axes:    jnp.ndarray,   # (Nc, 3)
     cylinder_hh:      jnp.ndarray,   # (Nc,)
     cylinder_radii:   jnp.ndarray,   # (Nc,)
+    obb_centers:      jnp.ndarray,   # (No, 3)
+    obb_quaternions:  jnp.ndarray,   # (No, 4)
+    obb_half_extents: jnp.ndarray,   # (No, 3)
 ) -> jnp.ndarray:                    # (H, W) float32
     """
     Render a depth image.
@@ -101,6 +104,13 @@ def render_depth(
             lambda c, ax, hh, r: jax.vmap(lambda o, d: ray_cylinder(o, d, c, ax, hh, r))(rays_o, rays_d)
         )(cylinder_centers, cylinder_axes, cylinder_hh, cylinder_radii)
         depth = jnp.minimum(depth, jnp.min(cylinder_depths, axis=0))
+
+    # OBBs: (No, N_rays)
+    if obb_centers.shape[0] > 0:
+        obb_depths = jax.vmap(
+            lambda c, q, he: jax.vmap(lambda o, d: ray_obb(o, d, c, q, he))(rays_o, rays_d)
+        )(obb_centers, obb_quaternions, obb_half_extents)
+        depth = jnp.minimum(depth, jnp.min(obb_depths, axis=0))
 
     return depth.reshape(height, width)
 
