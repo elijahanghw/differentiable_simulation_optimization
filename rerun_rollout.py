@@ -176,6 +176,7 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
       0-3:  sphere cx, cy, cz, r
       4-9:  box cx, cy, cz, hx, hy, hz
       10-16: capsule cx, cy, cz, theta, phi, hh, r
+    Trees use fold_in(cell_key, 1000) → 7 keys, matching scene.py exactly.
 
     Returns:
         box_centers      (N, 3) numpy array
@@ -192,6 +193,7 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
     Mb = scene_cfg.boxes_per_cell
     Ms = scene_cfg.spheres_per_cell
     Mc = scene_cfg.capsules_per_cell
+    Mt = scene_cfg.trees_per_cell
 
     ix_min = int(np.floor(x_min / cell_size))
     ix_max = int(np.floor(x_max / cell_size))
@@ -254,6 +256,43 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
                 all_cap_ax.append(np.stack([ax, ay, az], axis=-1))
                 all_cap_hh.append(np.array(c_hh))
                 all_cap_r.append(np.array(c_r))
+
+            # Trees — separate key stream via fold_in, matching scene.py exactly
+            if Mt > 0:
+                tree_key = jax.random.fold_in(cell_key, 1000)
+                tkeys   = jax.random.split(tree_key, 7)
+
+                t_x         = np.array(jax.random.uniform(tkeys[0], (Mt,), minval=x0, maxval=x1))
+                t_y         = np.array(jax.random.uniform(tkeys[1], (Mt,), minval=y0, maxval=y1))
+                t_trunk_hh  = np.array(jax.random.uniform(tkeys[2], (Mt,), minval=scene_cfg.tree_trunk_hh_min,  maxval=scene_cfg.tree_trunk_hh_max))
+                t_trunk_r   = np.array(jax.random.uniform(tkeys[3], (Mt,), minval=scene_cfg.tree_trunk_r_min,   maxval=scene_cfg.tree_trunk_r_max))
+                t_branch_hh = np.array(jax.random.uniform(tkeys[4], (Mt,), minval=scene_cfg.tree_branch_hh_min, maxval=scene_cfg.tree_branch_hh_max))
+                t_branch_r  = np.array(jax.random.uniform(tkeys[5], (Mt,), minval=scene_cfg.tree_branch_r_min,  maxval=scene_cfg.tree_branch_r_max))
+                phi_off     = np.array(jax.random.uniform(tkeys[6], (Mt,), minval=0.0, maxval=2*_math.pi/3))
+
+                # Trunk: vertical, base at z=0, axis = (0, 0, 1) in NED
+                trunk_c  = np.stack([t_x, t_y, -t_trunk_hh], axis=-1)   # (Mt, 3)
+                trunk_ax = np.zeros((Mt, 3)); trunk_ax[:, 2] = 1.0        # (Mt, 3)
+
+                # Branches: 3 per tree at 120° spacing, tilted from vertical
+                sin_t = _math.sin(scene_cfg.tree_branch_tilt)
+                cos_t = _math.cos(scene_cfg.tree_branch_tilt)
+                for b in range(3):
+                    phis_b   = phi_off + b * 2 * _math.pi / 3
+                    b_ax     = np.stack([sin_t * np.cos(phis_b),
+                                         sin_t * np.sin(phis_b),
+                                         np.full(Mt, -cos_t)], axis=-1)   # (Mt, 3)
+                    trunk_top = np.stack([t_x, t_y, -2.0 * t_trunk_hh], axis=-1)
+                    b_c       = trunk_top + t_branch_hh[:, None] * b_ax   # (Mt, 3)
+                    all_cap_c.append(b_c)
+                    all_cap_ax.append(b_ax)
+                    all_cap_hh.append(t_branch_hh)
+                    all_cap_r.append(t_branch_r)
+
+                all_cap_c.append(trunk_c)
+                all_cap_ax.append(trunk_ax)
+                all_cap_hh.append(t_trunk_hh)
+                all_cap_r.append(t_trunk_r)
 
     _empty3 = np.zeros((0, 3), dtype=np.float32)
     _empty1 = np.zeros((0,),   dtype=np.float32)

@@ -75,7 +75,8 @@ class Navigate:
     l_min:     float = 0.06;        l_max:     float = 0.14;        l_default:     float = 0.10
     # l_min:     float = 0.06;        l_max:     float = 0.15;        l_default:     float = 0.10
     psi_min:   float = -jnp.pi/9;   psi_max:   float = jnp.pi/9;    psi_default:   float = 0.0
-    theta_min: float = -jnp.pi / 6; theta_max: float = jnp.pi / 6;  theta_default: float = 0.0
+    # theta_min: float = -jnp.pi / 6; theta_max: float = jnp.pi / 6;  theta_default: float = 0.0
+    theta_min: float = -jnp.pi / 4; theta_max: float = jnp.pi / 4;  theta_default: float = 0.0
     phi_min:   float = -jnp.pi / 2; phi_max:   float = jnp.pi / 2;  phi_default:   float = 0.0
     alpha_min: float = -jnp.pi/2;         alpha_max: float = jnp.pi / 2;  alpha_default: float = 0.0
     # alpha_min: float = 0.0;         alpha_max: float = jnp.pi / 2;  alpha_default: float = 0.0
@@ -418,7 +419,7 @@ class Navigate:
             (self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:]))) * v_to_pt
         )
         loss_obj = jnp.mean(
-            (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
+            (jax.nn.relu(2.0 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
         total = (self.xy_weight*loss_xy + self.z_weight*loss_z

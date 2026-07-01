@@ -1,12 +1,12 @@
 # Bars — Long boxes.
-arena_z_min: -5.0
+arena_z_min: -4.5
 arena_z_max: 0.0
 
-boxes_per_cell: 2
+boxes_per_cell: 6
 
-box_hx_min: 0.05
-box_hx_max: 0.20
-box_hy_min: 1.00
+box_hx_min: 0.30
+box_hx_max: 0.50
+box_hy_min: 1.50
 box_hy_max: 2.00
-box_hz_min: 0.05
-box_hz_max: 0.20
+box_hz_min: 0.10
+box_hz_max: 0.30

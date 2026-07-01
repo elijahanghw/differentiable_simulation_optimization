@@ -137,7 +137,9 @@ def morphology(l, psi=None, theta=None, phi=None, alpha=None, mount_radius=MOUNT
     tangential = jnp.stack(
         [-jnp.sin(arm_yaw), jnp.cos(arm_yaw), jnp.zeros_like(arm_yaw)], axis=1
     )  # (6, 3)
-    thrust_pitched = _rodrigues(thrust_base, tangential, (theta_full - alpha_full))          # (6, 3)
+    # motor_pitch_angle = theta_full - alpha_full
+    motor_pitch_angle = -alpha_full
+    thrust_pitched = _rodrigues(thrust_base, tangential, motor_pitch_angle)          # (6, 3)
 
     # 3. Roll by phi around the arm axis.
     propeller_orientations = _rodrigues(thrust_pitched, arm_unit, phi_full)   # (6, 3)
