@@ -183,11 +183,13 @@ def train(config: Dict[str, Any]) -> Any:
         )
         if has_morphological_loss:
             def _morphological_loss_fn(morph_params):
+                psi   = env.get_psi(morph_params)   if hasattr(env, "get_psi")   else None
                 alpha = env.get_alpha(morph_params) if hasattr(env, "get_alpha") else None
                 return propeller_collision_loss_from_params(
                     env.get_l(morph_params),
-                    env.get_theta(morph_params),
-                    env.get_phi(morph_params),
+                    psi=psi,
+                    theta=env.get_theta(morph_params),
+                    phi=env.get_phi(morph_params),
                     alpha=alpha,
                     weight=morph_loss_weight,
                 )
