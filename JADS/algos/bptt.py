@@ -44,6 +44,9 @@ from JADS.utils.checkpoint import save as save_checkpoint
 def _build_loss_fn(env, policy, horizon: int):
     has_hidden = hasattr(policy, "init_hidden")
     has_depth  = hasattr(policy, "conv_features")
+    # Constant for every rollout (no morph_params) — computed once instead of
+    # once per scan step.
+    morph_matrices = env.compute_morphology()
 
     def single_rollout(policy_params, init_state, init_obs):
         if has_hidden:
@@ -54,14 +57,14 @@ def _build_loss_fn(env, policy, horizon: int):
                     action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
                 else:
                     action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
-                new_state, new_obs, step_data = env.step(state, action)
+                new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs, new_hidden), step_data
             init_carry = (init_state, init_obs, policy.init_hidden())
         else:
             def step(carry, _):
                 state, obs = carry
                 action = policy.apply({"params": policy_params}, obs)
-                new_state, new_obs, step_data = env.step(state, action)
+                new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs), step_data
             init_carry = (init_state, init_obs)
 
@@ -83,6 +86,10 @@ def _build_loss_fn_morph(env, policy, horizon: int):
     has_depth  = hasattr(policy, "conv_features")
 
     def single_rollout(policy_params, morph_params, init_state, init_obs):
+        # morph_params is fixed for the whole rollout — compute the derived
+        # thrust/inertia matrices once instead of once per scan step.
+        morph_matrices = env.compute_morphology(morph_params)
+
         if has_hidden:
             def step(carry, _):
                 state, obs, hidden = carry
@@ -91,14 +98,14 @@ def _build_loss_fn_morph(env, policy, horizon: int):
                     action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
                 else:
                     action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
-                new_state, new_obs, step_data = env.step(state, action, morph_params)
+                new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs, new_hidden), step_data
             init_carry = (init_state, init_obs, policy.init_hidden())
         else:
             def step(carry, _):
                 state, obs = carry
                 action = policy.apply({"params": policy_params}, obs)
-                new_state, new_obs, step_data = env.step(state, action, morph_params)
+                new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs), step_data
             init_carry = (init_state, init_obs)
 

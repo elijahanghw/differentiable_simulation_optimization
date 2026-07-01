@@ -350,8 +350,16 @@ class Navigate:
     # Step
     # -----------------------------------------------------------------------
 
-    def step(self, state: jnp.ndarray, action: jnp.ndarray, morph_params: dict = None) -> tuple:
-        # ---- Morphology ----------------------------------------------------
+    def compute_morphology(self, morph_params: dict = None):
+        """
+        Compute (Bf, Bm, m, J, J_inv, motor_pos_body) from morph_params.
+
+        Pure function of morph_params (or, when untrained, the env's fixed
+        default angles) — constant across an entire rollout. Callers running
+        a multi-step rollout (e.g. lax.scan over step()) should call this
+        once and pass the result to every step() via `morph_matrices` instead
+        of letting step() recompute it every call.
+        """
         if self.train_morphology and morph_params is not None:
             l = self.get_l(morph_params)
             psi = self.get_psi(morph_params)
@@ -368,7 +376,14 @@ class Navigate:
                 phi = jnp.full(3, self.phi_default)
             alpha  = jnp.full(3, self.alpha_default)
 
-        Bf, Bm, m, J, J_inv, motor_pos_body = morphology(l, psi, theta, phi, alpha)
+        return morphology(l, psi, theta, phi, alpha)
+
+    def step(self, state: jnp.ndarray, action: jnp.ndarray, morph_params: dict = None,
+             morph_matrices: tuple = None) -> tuple:
+        # ---- Morphology ----------------------------------------------------
+        if morph_matrices is None:
+            morph_matrices = self.compute_morphology(morph_params)
+        Bf, Bm, m, J, J_inv, motor_pos_body = morph_matrices
         U = jnp.clip(action, -1.0, 1.0)
 
         integrators = {"euler": forward_euler, "semi_implicit_euler": semi_implicit_euler, "rk4": rk4}
