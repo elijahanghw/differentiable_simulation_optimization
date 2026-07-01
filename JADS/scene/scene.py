@@ -105,14 +105,14 @@ class SceneConfig:
 
     # ---- Tree obstacles (trunk AABB + 3 branch OBBs) -----------------------
     # Trunk: vertical AABB, base at z=0 (ground), grows upward (−z in NED).
-    # Branches: start at trunk top, fan out 120° apart at a per-tree tilt angle
-    #           sampled in [tree_branch_tilt_min, tree_branch_tilt_max] radians
-    #           from the vertical, with a random per-tree azimuth offset.
+    # Branches: start at trunk top, fan out 120° apart at a fixed tilt angle
+    #           (tree_branch_tilt radians from vertical) with a random per-tree
+    #           azimuth offset.
     tree_trunk_r_min:     float = 0.05;  tree_trunk_r_max:     float = 0.12
     tree_trunk_hh_min:    float = 0.60;  tree_trunk_hh_max:    float = 1.50
     tree_branch_r_min:    float = 0.03;  tree_branch_r_max:    float = 0.06
     tree_branch_hh_min:   float = 0.30;  tree_branch_hh_max:   float = 0.70
-    tree_branch_tilt_min: float = 0.50;  tree_branch_tilt_max: float = 0.90
+    tree_branch_tilt:     float = 0.75
 
     scene_dim: int = _field(init=False, repr=True)
     procedural: bool = _field(init=False, repr=True)
@@ -232,30 +232,29 @@ class SceneConfig:
             # Trees — separate key stream so existing capsule/sphere/box
             # randomisation is unchanged when trees_per_cell=0.
             tree_key = jax.random.fold_in(cell_key, 1000)
-            tkeys   = jax.random.split(tree_key, 8)
+            tkeys   = jax.random.split(tree_key, 7)
 
-            t_cx         = jax.random.uniform(tkeys[0], (Mt,), minval=x_min, maxval=x_max)
-            t_cy         = jax.random.uniform(tkeys[1], (Mt,), minval=y_min, maxval=y_max)
-            t_trunk_hh   = jax.random.uniform(tkeys[2], (Mt,), minval=self.tree_trunk_hh_min,    maxval=self.tree_trunk_hh_max)
-            t_trunk_r    = jax.random.uniform(tkeys[3], (Mt,), minval=self.tree_trunk_r_min,     maxval=self.tree_trunk_r_max)
-            t_branch_hh  = jax.random.uniform(tkeys[4], (Mt,), minval=self.tree_branch_hh_min,  maxval=self.tree_branch_hh_max)
-            t_branch_r   = jax.random.uniform(tkeys[5], (Mt,), minval=self.tree_branch_r_min,   maxval=self.tree_branch_r_max)
-            phi_off      = jax.random.uniform(tkeys[6], (Mt,), minval=0.0, maxval=2*math.pi/3)
-            t_tilt       = jax.random.uniform(tkeys[7], (Mt,), minval=self.tree_branch_tilt_min, maxval=self.tree_branch_tilt_max)
+            t_cx        = jax.random.uniform(tkeys[0], (Mt,), minval=x_min, maxval=x_max)
+            t_cy        = jax.random.uniform(tkeys[1], (Mt,), minval=y_min, maxval=y_max)
+            t_trunk_hh  = jax.random.uniform(tkeys[2], (Mt,), minval=self.tree_trunk_hh_min,   maxval=self.tree_trunk_hh_max)
+            t_trunk_r   = jax.random.uniform(tkeys[3], (Mt,), minval=self.tree_trunk_r_min,    maxval=self.tree_trunk_r_max)
+            t_branch_hh = jax.random.uniform(tkeys[4], (Mt,), minval=self.tree_branch_hh_min,  maxval=self.tree_branch_hh_max)
+            t_branch_r  = jax.random.uniform(tkeys[5], (Mt,), minval=self.tree_branch_r_min,   maxval=self.tree_branch_r_max)
+            phi_off     = jax.random.uniform(tkeys[6], (Mt,), minval=0.0, maxval=2*math.pi/3)
 
             # Trunk: AABB, merged into box arrays
             trunk_centers = jnp.stack([t_cx, t_cy, -t_trunk_hh], axis=-1)           # (Mt, 3)
             trunk_he      = jnp.stack([t_trunk_r, t_trunk_r, t_trunk_hh], axis=-1)  # (Mt, 3)
 
-            # Branches: OBB — 3 per tree at 120° azimuth spacing, tilted from vertical
+            # Branches: OBB — 3 per tree at 120° azimuth spacing, fixed tilt
             phis = jnp.stack(
                 [phi_off, phi_off + 2*math.pi/3, phi_off + 4*math.pi/3], axis=-1
             )  # (Mt, 3)
-            sin_t = jnp.sin(t_tilt)  # (Mt,)
-            cos_t = jnp.cos(t_tilt)  # (Mt,)
-            b_ax_x = sin_t[:, None] * jnp.cos(phis)          # (Mt, 3)
-            b_ax_y = sin_t[:, None] * jnp.sin(phis)          # (Mt, 3)
-            b_ax_z = -cos_t[:, None] * jnp.ones_like(b_ax_x) # (Mt, 3) — upward in NED (−z)
+            sin_t = math.sin(self.tree_branch_tilt)  # scalar constant
+            cos_t = math.cos(self.tree_branch_tilt)
+            b_ax_x = sin_t * jnp.cos(phis)           # (Mt, 3)
+            b_ax_y = sin_t * jnp.sin(phis)           # (Mt, 3)
+            b_ax_z = -cos_t * jnp.ones_like(b_ax_x)  # (Mt, 3)
             branch_axes = jnp.stack([b_ax_x, b_ax_y, b_ax_z], axis=-1)  # (Mt, 3, 3)
 
             trunk_tops = jnp.stack([t_cx, t_cy, -2.0 * t_trunk_hh], axis=-1)  # (Mt, 3)
@@ -387,16 +386,15 @@ class SceneConfig:
         # Separate key stream (fold_in) so existing capsule/box/sphere
         # randomisation is unchanged when n_trees=0.
         if Nt > 0:
-            k_tree = jax.random.split(jax.random.fold_in(key, 1000), 8)
+            k_tree = jax.random.split(jax.random.fold_in(key, 1000), 7)
 
-            t_x         = jax.random.uniform(k_tree[0], (Nt,), minval=self.arena_x_min,        maxval=self.arena_x_max)
-            t_y         = jax.random.uniform(k_tree[1], (Nt,), minval=self.arena_y_min,        maxval=self.arena_y_max)
-            t_trunk_hh  = jax.random.uniform(k_tree[2], (Nt,), minval=self.tree_trunk_hh_min,   maxval=self.tree_trunk_hh_max)
-            t_trunk_r   = jax.random.uniform(k_tree[3], (Nt,), minval=self.tree_trunk_r_min,    maxval=self.tree_trunk_r_max)
-            t_branch_hh = jax.random.uniform(k_tree[4], (Nt,), minval=self.tree_branch_hh_min,  maxval=self.tree_branch_hh_max)
-            t_branch_r  = jax.random.uniform(k_tree[5], (Nt,), minval=self.tree_branch_r_min,   maxval=self.tree_branch_r_max)
+            t_x         = jax.random.uniform(k_tree[0], (Nt,), minval=self.arena_x_min,       maxval=self.arena_x_max)
+            t_y         = jax.random.uniform(k_tree[1], (Nt,), minval=self.arena_y_min,       maxval=self.arena_y_max)
+            t_trunk_hh  = jax.random.uniform(k_tree[2], (Nt,), minval=self.tree_trunk_hh_min,  maxval=self.tree_trunk_hh_max)
+            t_trunk_r   = jax.random.uniform(k_tree[3], (Nt,), minval=self.tree_trunk_r_min,   maxval=self.tree_trunk_r_max)
+            t_branch_hh = jax.random.uniform(k_tree[4], (Nt,), minval=self.tree_branch_hh_min, maxval=self.tree_branch_hh_max)
+            t_branch_r  = jax.random.uniform(k_tree[5], (Nt,), minval=self.tree_branch_r_min,  maxval=self.tree_branch_r_max)
             phi_off     = jax.random.uniform(k_tree[6], (Nt,), minval=0.0, maxval=2*math.pi/3)
-            t_tilt      = jax.random.uniform(k_tree[7], (Nt,), minval=self.tree_branch_tilt_min, maxval=self.tree_branch_tilt_max)
 
             # Trunk: AABB, merged into box arrays
             trunk_centers = jnp.stack([t_x, t_y, -t_trunk_hh], axis=-1)           # (Nt, 3)
@@ -404,15 +402,15 @@ class SceneConfig:
             box_centers      = jnp.concatenate([box_centers,      trunk_centers.reshape(-1)])
             box_half_extents = jnp.concatenate([box_half_extents, trunk_he.reshape(-1)])
 
-            # Branches: OBB — 3 per tree at 120° azimuth spacing
+            # Branches: OBB — 3 per tree at 120° azimuth spacing, fixed tilt
             phis = jnp.stack(
                 [phi_off, phi_off + 2*math.pi/3, phi_off + 4*math.pi/3], axis=-1
             )  # (Nt, 3)
-            sin_t = jnp.sin(t_tilt)  # (Nt,)
-            cos_t = jnp.cos(t_tilt)  # (Nt,)
-            b_ax_x = sin_t[:, None] * jnp.cos(phis)
-            b_ax_y = sin_t[:, None] * jnp.sin(phis)
-            b_ax_z = -cos_t[:, None] * jnp.ones_like(b_ax_x)
+            sin_t = math.sin(self.tree_branch_tilt)  # scalar constant
+            cos_t = math.cos(self.tree_branch_tilt)
+            b_ax_x = sin_t * jnp.cos(phis)
+            b_ax_y = sin_t * jnp.sin(phis)
+            b_ax_z = -cos_t * jnp.ones_like(b_ax_x)
             branch_axes = jnp.stack([b_ax_x, b_ax_y, b_ax_z], axis=-1)  # (Nt, 3, 3)
 
             trunk_tops = jnp.stack([t_x, t_y, -2.0 * t_trunk_hh], axis=-1)  # (Nt, 3)
