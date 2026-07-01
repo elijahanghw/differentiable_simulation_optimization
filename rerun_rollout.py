@@ -265,16 +265,15 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
             # Trees — separate key stream via fold_in, matching scene.py exactly
             if Mt > 0:
                 tree_key = jax.random.fold_in(cell_key, 1000)
-                tkeys   = jax.random.split(tree_key, 8)
+                tkeys   = jax.random.split(tree_key, 7)
 
                 t_x         = np.array(jax.random.uniform(tkeys[0], (Mt,), minval=x0, maxval=x1))
                 t_y         = np.array(jax.random.uniform(tkeys[1], (Mt,), minval=y0, maxval=y1))
-                t_trunk_hh  = np.array(jax.random.uniform(tkeys[2], (Mt,), minval=scene_cfg.tree_trunk_hh_min,    maxval=scene_cfg.tree_trunk_hh_max))
-                t_trunk_r   = np.array(jax.random.uniform(tkeys[3], (Mt,), minval=scene_cfg.tree_trunk_r_min,     maxval=scene_cfg.tree_trunk_r_max))
+                t_trunk_hh  = np.array(jax.random.uniform(tkeys[2], (Mt,), minval=scene_cfg.tree_trunk_hh_min,   maxval=scene_cfg.tree_trunk_hh_max))
+                t_trunk_r   = np.array(jax.random.uniform(tkeys[3], (Mt,), minval=scene_cfg.tree_trunk_r_min,    maxval=scene_cfg.tree_trunk_r_max))
                 t_branch_hh = np.array(jax.random.uniform(tkeys[4], (Mt,), minval=scene_cfg.tree_branch_hh_min,  maxval=scene_cfg.tree_branch_hh_max))
                 t_branch_r  = np.array(jax.random.uniform(tkeys[5], (Mt,), minval=scene_cfg.tree_branch_r_min,   maxval=scene_cfg.tree_branch_r_max))
                 phi_off     = np.array(jax.random.uniform(tkeys[6], (Mt,), minval=0.0, maxval=2*_math.pi/3))
-                t_tilt      = np.array(jax.random.uniform(tkeys[7], (Mt,), minval=scene_cfg.tree_branch_tilt_min, maxval=scene_cfg.tree_branch_tilt_max))
 
                 # Trunk: AABB merged into box arrays
                 trunk_c  = np.stack([t_x, t_y, -t_trunk_hh], axis=-1)           # (Mt, 3)
@@ -282,9 +281,9 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
                 all_box_c.append(trunk_c)
                 all_box_he.append(trunk_he)
 
-                # Branches: OBB
-                sin_t = np.sin(t_tilt)  # (Mt,)
-                cos_t = np.cos(t_tilt)  # (Mt,)
+                # Branches: OBB — fixed tilt angle
+                sin_t = _math.sin(scene_cfg.tree_branch_tilt)
+                cos_t = _math.cos(scene_cfg.tree_branch_tilt)
                 for b in range(3):
                     phis_b    = phi_off + b * 2 * _math.pi / 3
                     b_ax      = np.stack([sin_t * np.cos(phis_b),

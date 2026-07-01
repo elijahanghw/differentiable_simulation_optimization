@@ -1,4 +1,4 @@
-trees_per_cell: 1
+trees_per_cell: 2
 tree_trunk_r_min: 0.05
 tree_trunk_r_max: 0.12
 tree_trunk_hh_min: 0.75
@@ -7,5 +7,4 @@ tree_branch_r_min: 0.03
 tree_branch_r_max: 0.06
 tree_branch_hh_min: 0.35
 tree_branch_hh_max: 0.75
-tree_branch_tilt_min: 0.50
-tree_branch_tilt_max: 1.20
+tree_branch_tilt: 0.75

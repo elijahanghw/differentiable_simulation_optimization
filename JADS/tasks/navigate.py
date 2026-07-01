@@ -197,11 +197,11 @@ class Navigate:
     # Observation & scene extraction
     # -----------------------------------------------------------------------
 
-    def _get_obs(self, state: jnp.ndarray) -> jnp.ndarray:
+    def _get_obs(self, state: jnp.ndarray, arrays: dict = None) -> jnp.ndarray:
         rel_pos = state[0:3] - state[19:22]
         euler = jax.lax.stop_gradient(quat_to_euler(state[6:10]))
         drone_states = jnp.concatenate([rel_pos, state[3:6], euler, state[10:13], state[13:19]])
-        depth_map = jax.lax.stop_gradient(self._get_processed_depth(state))
+        depth_map = jax.lax.stop_gradient(self._get_processed_depth(state, arrays=arrays))
         return (depth_map, drone_states)
     
     def _unpack_scene(self, state: jnp.ndarray) -> dict:
@@ -228,19 +228,22 @@ class Navigate:
             })
         return self.scene_cfg.unpack(state[22:])
 
-    def _get_depth(self, state: jnp.ndarray) -> jnp.ndarray:
+    def _get_depth(self, state: jnp.ndarray, arrays: dict = None) -> jnp.ndarray:
         """
         Render a depth image from the drone's perspective.
 
         Args:
-            state: (state_dim,) — full environment state vector.
+            state:  (state_dim,) — full environment state vector.
+            arrays: pre-unpacked scene geometry (see _unpack_scene). Pass this
+                    in when the caller already unpacked the scene for `state`,
+                    to avoid re-sampling the procedural obstacle neighbourhood.
 
         Returns:
             (cam_height, cam_width) float32 — depth in metres.
             0 = closer than cam_min_range.
             cam_max_range = no-hit or saturated.
         """
-        arrays = self._unpack_scene(state)
+        arrays = arrays if arrays is not None else self._unpack_scene(state)
         return apply_sensor_noise(
             render_depth(
                 position         = state[0:3],
@@ -292,8 +295,8 @@ class Navigate:
             quantization_m = self.cam_quantization_m,
         )
 
-    def _get_processed_depth(self, state):
-        raw   = self._get_depth(state)
+    def _get_processed_depth(self, state, arrays: dict = None):
+        raw   = self._get_depth(state, arrays=arrays)
         normd = 3.0 / jnp.clip(raw, 0.3, self.cam_max_range) - 0.6
         # 4×4 max-pool: (48, 64) → (12, 16)
         return jax.lax.reduce_window(
@@ -301,14 +304,18 @@ class Navigate:
             window_dimensions=(4, 4), window_strides=(4, 4), padding="VALID",
         )
     
-    def _get_nearest_obstacle_dist(self, state, motor_positions_world=None):
+    def _get_nearest_obstacle_dist(self, state, motor_positions_world=None, arrays: dict = None):
         """Signed distance to the nearest obstacle surface (negative = inside).
 
         If motor_positions_world (6, 3) is provided, the effective distance is
         min(body_center_dist, min_i(motor_dist_i - motor_collision_radius)).
+
+        `arrays` (pre-unpacked scene geometry) can be passed in to avoid
+        re-sampling the procedural obstacle neighbourhood when the caller
+        already unpacked the scene for `state`.
         """
         pos    = state[0:3]
-        arrays = self._unpack_scene(state)
+        arrays = arrays if arrays is not None else self._unpack_scene(state)
 
         def _point_dist(pt):
             d = point_plane_dist(pt, jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, -1.0]))
@@ -379,7 +386,8 @@ class Navigate:
         R_sg            = jax.lax.stop_gradient(quat_to_rotmat(next_drone[6:10]))
         motor_pos_world = next_drone[0:3] + motor_pos_body @ R_sg.T  # (6, 3) world frame
 
-        dist = self._get_nearest_obstacle_dist(next_state, motor_pos_world)
+        arrays = self._unpack_scene(next_state)
+        dist = self._get_nearest_obstacle_dist(next_state, motor_pos_world, arrays=arrays)
         step_data = {
             "pos":        next_state[0:3],
             "vel":        next_state[3:6],
@@ -388,7 +396,7 @@ class Navigate:
             "omega":      next_state[10:13],
             "dist":       dist,
         }
-        return next_state, self._get_obs(next_state), step_data
+        return next_state, self._get_obs(next_state, arrays=arrays), step_data
 
     def compute_loss(self, traj):
         """
