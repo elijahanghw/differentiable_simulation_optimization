@@ -229,6 +229,14 @@ class SceneConfig:
                                      jnp.cos(theta)], axis=-1)  # (Mc, 3)
             cap_centers = jnp.stack([c_cx, c_cy, c_cz], axis=-1)  # (Mc, 3)
 
+            # End-cap spheres for standalone capsules only, merged into the
+            # sphere arrays here (mirrors trunk-into-box merging below).
+            if Mc > 0:
+                cap_a = cap_centers - c_hh[:, None] * cap_axes
+                cap_b = cap_centers + c_hh[:, None] * cap_axes
+                sphere_centers = jnp.concatenate([sphere_centers, cap_a, cap_b], axis=0)
+                sphere_radii   = jnp.concatenate([sphere_radii,   c_r, c_r],     axis=0)
+
             # Trees — separate key stream so existing capsule/sphere/box
             # randomisation is unchanged when trees_per_cell=0.
             tree_key = jax.random.fold_in(cell_key, 1000)
@@ -293,8 +301,8 @@ class SceneConfig:
          cap_centers, cap_axes, cap_hh, cap_radii,
          obb_centers, obb_quats, obb_he) = results
 
-        sph_c      = sphere_centers.reshape(9 * Ms, 3)
-        sph_r      = sphere_radii.reshape(9 * Ms)
+        sph_c      = sphere_centers.reshape(9 * (Ms + 2 * Mc), 3)
+        sph_r      = sphere_radii.reshape(9 * (Ms + 2 * Mc))
         box_c      = box_centers.reshape(9 * (Mb + Mt), 3)
         box_he     = box_half_extents.reshape(9 * (Mb + Mt), 3)
         cap_c      = cap_centers.reshape(9 * Mc, 3)
@@ -304,13 +312,6 @@ class SceneConfig:
         obb_c_out  = obb_centers.reshape(9 * 3 * Mt, 3)
         obb_q_out  = obb_quats.reshape(9 * 3 * Mt, 4)
         obb_he_out = obb_he.reshape(9 * 3 * Mt, 3)
-
-        # Add end-cap spheres for standalone capsules only
-        if Mc > 0:
-            cap_a = cap_c - cap_hh_out[:, None] * cap_ax
-            cap_b = cap_c + cap_hh_out[:, None] * cap_ax
-            sph_c = jnp.concatenate([sph_c, cap_a, cap_b], axis=0)
-            sph_r = jnp.concatenate([sph_r, cap_r_out, cap_r_out], axis=0)
 
         return (
             sph_c,
