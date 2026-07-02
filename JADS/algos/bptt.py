@@ -28,6 +28,7 @@ import time
 from typing import Any, Dict
 
 import jax
+import jax.numpy as jnp
 import optax
 
 from JADS.tasks import make_env
@@ -50,25 +51,29 @@ def _build_loss_fn(env, policy, horizon: int):
 
     def single_rollout(policy_params, init_state, init_obs):
         if has_hidden:
-            def step(carry, _):
+            def step(carry, step_idx):
                 state, obs, hidden = carry
                 if has_depth:
                     depth_img, obs_vec = obs
                     action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+                    new_state, new_obs, step_data = env.step(
+                        state, action, morph_matrices=morph_matrices,
+                        step_idx=step_idx, prev_depth=depth_img,
+                    )
                 else:
                     action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
-                new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
+                    new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs, new_hidden), step_data
             init_carry = (init_state, init_obs, policy.init_hidden())
         else:
-            def step(carry, _):
+            def step(carry, step_idx):
                 state, obs = carry
                 action = policy.apply({"params": policy_params}, obs)
                 new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs), step_data
             init_carry = (init_state, init_obs)
 
-        _, traj = jax.lax.scan(step, init_carry, None, length=horizon)
+        _, traj = jax.lax.scan(step, init_carry, jnp.arange(horizon), length=horizon)
         return traj
 
     batch_rollout = jax.vmap(single_rollout, in_axes=(None, 0, 0))
@@ -91,25 +96,29 @@ def _build_loss_fn_morph(env, policy, horizon: int):
         morph_matrices = env.compute_morphology(morph_params)
 
         if has_hidden:
-            def step(carry, _):
+            def step(carry, step_idx):
                 state, obs, hidden = carry
                 if has_depth:
                     depth_img, obs_vec = obs
                     action, new_hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+                    new_state, new_obs, step_data = env.step(
+                        state, action, morph_matrices=morph_matrices,
+                        step_idx=step_idx, prev_depth=depth_img,
+                    )
                 else:
                     action, new_hidden = policy.apply({"params": policy_params}, obs, hidden)
-                new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
+                    new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs, new_hidden), step_data
             init_carry = (init_state, init_obs, policy.init_hidden())
         else:
-            def step(carry, _):
+            def step(carry, step_idx):
                 state, obs = carry
                 action = policy.apply({"params": policy_params}, obs)
                 new_state, new_obs, step_data = env.step(state, action, morph_matrices=morph_matrices)
                 return (new_state, new_obs), step_data
             init_carry = (init_state, init_obs)
 
-        _, traj = jax.lax.scan(step, init_carry, None, length=horizon)
+        _, traj = jax.lax.scan(step, init_carry, jnp.arange(horizon), length=horizon)
         return traj
 
     batch_rollout = jax.vmap(single_rollout, in_axes=(None, None, 0, 0))

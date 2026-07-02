@@ -414,17 +414,25 @@ def _log_scene(scene_cfg, scene_array, traj_positions=None):
 # ---------------------------------------------------------------------------
 
 def run_rollout(env, policy, policy_params, morph_params, key, steps):
+    """
+    Runs the physics/policy loop at env.dt while the depth camera (both the
+    policy's own depth obs and the visualized vis_depth) only refreshes every
+    env.frame_skip steps — the frames in between hold the last rendered image,
+    matching what the policy actually saw at train/inference time.
+    """
     has_hidden    = hasattr(policy, "init_hidden")
     has_depth     = hasattr(policy, "conv_features")
     has_vis_depth = hasattr(env, "get_vis_depth")
+    frame_skip    = getattr(env, "frame_skip", 1)
 
     obs, state, _ = env.reset(key)
     states     = [np.array(state)]
-    vis_depths = [np.array(env.get_vis_depth(state))] if has_vis_depth else None
+    last_vis_depth = np.array(env.get_vis_depth(state)) if has_vis_depth else None
+    vis_depths = [last_vis_depth] if has_vis_depth else None
 
     hidden = policy.init_hidden() if has_hidden else None
 
-    for _ in range(steps):
+    for t in range(steps):
         if has_hidden:
             if has_depth:
                 depth_img, obs_vec = obs
@@ -434,10 +442,15 @@ def run_rollout(env, policy, policy_params, morph_params, key, steps):
         else:
             action = policy.apply({"params": policy_params}, obs)
 
-        state, obs, _ = env.step(state, action, morph_params)
+        if has_depth:
+            state, obs, _ = env.step(state, action, morph_params, step_idx=t, prev_depth=depth_img)
+        else:
+            state, obs, _ = env.step(state, action, morph_params)
         states.append(np.array(state))
         if has_vis_depth:
-            vis_depths.append(np.array(env.get_vis_depth(state)))
+            if (t + 1) % frame_skip == 0:
+                last_vis_depth = np.array(env.get_vis_depth(state))
+            vis_depths.append(last_vis_depth)
 
     return np.stack(states), vis_depths
 

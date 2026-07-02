@@ -70,6 +70,7 @@ class Navigate:
     cam_min_range:     float = 0.2
     cam_max_range:     float = 8.0
     cam_quantization_m: float = 0.001
+    cam_hz:            float = 50.0   # depth-camera update rate; defaults to 1/dt (no frame skip)
 
     # ---- Morphology --------------------------------------------------------
     l_min:     float = 0.06;        l_max:     float = 0.14;        l_default:     float = 0.10
@@ -131,12 +132,18 @@ class Navigate:
             self.cam_min_range      = float(dc.get("min_range",      self.cam_min_range))
             self.cam_max_range      = float(dc.get("max_range",      self.cam_max_range))
             self.cam_quantization_m = float(dc.get("quantization_m", self.cam_quantization_m))
+            self.cam_hz             = float(dc.get("cam_hz",         self.cam_hz))
 
         if self.scene_cfg.procedural:
             self.scene_cfg.cell_size = self.cam_max_range
 
         self.state_dim = 22 + self.scene_cfg.scene_dim
         self._gd_factor = float(self.grad_decay ** self.dt)
+
+        # Depth camera runs slower than the physics/policy loop (dt): render a
+        # fresh frame every `frame_skip` steps and hold it (zero-order hold)
+        # on the steps in between.
+        self.frame_skip = max(1, round(1.0 / (self.dt * self.cam_hz)))
 
     # -----------------------------------------------------------------------
     # Reset
@@ -197,11 +204,30 @@ class Navigate:
     # Observation & scene extraction
     # -----------------------------------------------------------------------
 
-    def _get_obs(self, state: jnp.ndarray, arrays: dict = None) -> jnp.ndarray:
+    def _get_obs(self, state: jnp.ndarray, arrays: dict = None,
+                 step_idx: jnp.ndarray = None, prev_depth: jnp.ndarray = None) -> jnp.ndarray:
+        """
+        Args:
+            step_idx, prev_depth: pass both together to enable asynchronous
+                depth rendering — a fresh frame is only rendered when
+                `(step_idx + 1) % self.frame_skip == 0`; on the steps in
+                between, `prev_depth` (the caller's previous depth_map) is
+                held and returned unchanged (zero-order hold). Leave both
+                None (default) to always render, e.g. on reset().
+        """
         rel_pos = state[0:3] - state[19:22]
         euler = jax.lax.stop_gradient(quat_to_euler(state[6:10]))
         drone_states = jnp.concatenate([rel_pos, state[3:6], euler, state[10:13], state[13:19]])
-        depth_map = jax.lax.stop_gradient(self._get_processed_depth(state, arrays=arrays))
+
+        if step_idx is not None and self.frame_skip > 1:
+            should_render = (step_idx + 1) % self.frame_skip == 0
+            depth_map = jax.lax.cond(
+                should_render,
+                lambda: jax.lax.stop_gradient(self._get_processed_depth(state, arrays=arrays)),
+                lambda: prev_depth,
+            )
+        else:
+            depth_map = jax.lax.stop_gradient(self._get_processed_depth(state, arrays=arrays))
         return (depth_map, drone_states)
     
     def _unpack_scene(self, state: jnp.ndarray) -> dict:
@@ -379,7 +405,12 @@ class Navigate:
         return morphology(l, psi, theta, phi, alpha)
 
     def step(self, state: jnp.ndarray, action: jnp.ndarray, morph_params: dict = None,
-             morph_matrices: tuple = None) -> tuple:
+             morph_matrices: tuple = None,
+             step_idx: jnp.ndarray = None, prev_depth: jnp.ndarray = None) -> tuple:
+        """
+        step_idx, prev_depth: see `_get_obs` — pass both to hold the depth
+        image across steps and only re-render every `frame_skip` steps.
+        """
         # ---- Morphology ----------------------------------------------------
         if morph_matrices is None:
             morph_matrices = self.compute_morphology(morph_params)
@@ -411,7 +442,8 @@ class Navigate:
             "omega":      next_state[10:13],
             "dist":       dist,
         }
-        return next_state, self._get_obs(next_state, arrays=arrays), step_data
+        obs = self._get_obs(next_state, arrays=arrays, step_idx=step_idx, prev_depth=prev_depth)
+        return next_state, obs, step_data
 
     def compute_loss(self, traj):
         """
