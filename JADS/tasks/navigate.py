@@ -488,7 +488,7 @@ class Navigate:
             (self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:]))) * v_to_pt
         )
         loss_obj = jnp.mean(
-            (jax.nn.relu(2.0 - dist[:, 1:]) ** 2) * v_to_pt
+            (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
         total = (self.xy_weight*loss_xy + self.z_weight*loss_z
