@@ -72,10 +72,11 @@ training:
 # -----------------------------------------------------------------------
 evolution:
   strategy: CMA_ES        # any evosax.algorithms class: CMA_ES, Open_ES, PGPE, Sep_CMA_ES, ...
-  popsize: 5             # candidates per generation
+  popsize: 10             # candidates per generation
   generations: 50         # outer CMA-ES steps
   sigma0: 0.5             # initial genotype std over the raw pre-sigmoid params
-  inner_epochs: 1000       # BPTT epochs to train each candidate's policy
+  inner_epochs: 2000       # BPTT epochs to train each candidate's policy
+  vmap_population: true    # train+eval all candidates in parallel (fast, higher GPU memory)
 
 # -----------------------------------------------------------------------
 # Depth camera

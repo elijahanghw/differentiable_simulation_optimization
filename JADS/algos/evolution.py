@@ -69,7 +69,7 @@ def _make_strategy(name: str, population_size: int, solution):
 # Inner-loop evaluator: train a fresh policy for a fixed morphology, then eval
 # ---------------------------------------------------------------------------
 
-def _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape):
+def _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape, vmap_population=False):
     horizon    = tcfg["horizon"]
     batch_size = tcfg["batch_size"]
     eval_batch = tcfg.get("eval_batch_size", 2 * batch_size)
@@ -113,6 +113,12 @@ def _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape):
         _, eval_ret = loss_fn(policy_params, morph_params, estates, eobs)
         return eval_ret, policy_params, train_rets[-1]
 
+    if vmap_population:
+        # Train + evaluate the whole population in parallel. morph_params and
+        # train_key are batched over the population axis; eval_key is shared
+        # (common random numbers across candidates). Returns are batched:
+        # eval_ret (popsize,), policy_params leaves (popsize, ...).
+        evaluate = jax.vmap(evaluate, in_axes=(0, 0, None))
     return jax.jit(evaluate)
 
 
@@ -132,6 +138,7 @@ def train(config: Dict[str, Any]) -> Any:
     generations   = evcfg.get("generations", 30)
     sigma0        = evcfg.get("sigma0", 0.5)
     inner_epochs  = evcfg.get("inner_epochs", tcfg.get("epochs", 200))
+    vmap_population = evcfg.get("vmap_population", False)
     log_every     = tcfg.get("log_interval", 1)
 
     # -- Environment --------------------------------------------------------
@@ -164,7 +171,8 @@ def train(config: Dict[str, Any]) -> Any:
     key, es_key = jax.random.split(key)
     es_state = strategy.init(es_key, solution, es_params)
 
-    evaluate = _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape)
+    evaluate = _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape,
+                               vmap_population=vmap_population)
 
     # -- Logger -------------------------------------------------------------
     log_cfg   = config.get("logging", {})
@@ -184,7 +192,8 @@ def train(config: Dict[str, Any]) -> Any:
     print(f"Env          : {ecfg['name']}  |  obs_dim={env.obs_dim}  act_dim={env.act_dim}")
     print(f"Genotype     : {n_genes} raw morphology params  |  sigma0={sigma0}")
     print(f"Policy       : {pcfg['type']}  |  params={n_params:,}")
-    print(f"Outer        : popsize={popsize}  generations={generations}")
+    print(f"Outer        : popsize={popsize}  generations={generations}  "
+          f"eval={'vmap over population' if vmap_population else 'sequential'}")
     print(f"Inner        : BPTT epochs={inner_epochs}  horizon={tcfg['horizon']}  batch={tcfg['batch_size']}")
     print("-" * 60)
 
@@ -197,7 +206,7 @@ def train(config: Dict[str, Any]) -> Any:
     print("(JIT compiles the inner training on the first candidate — cached to .jax_cache/)")
     t_start = time.time()
 
-    best_return = -jnp.inf
+    best_return = -math.inf
     best_policy = None
     best_morph  = None
 
@@ -209,28 +218,38 @@ def train(config: Dict[str, Any]) -> Any:
         # distinct train/init key per candidate.
         train_keys = jax.random.split(train_key, popsize)
 
-        returns = []
-        gen_best_return = -jnp.inf
-        gen_best_morph  = None
-        for i in range(popsize):
-            cand = jax.tree_util.tree_map(lambda x: x[i], population)
-            eval_ret, policy_params, _ = evaluate(cand, train_keys[i], eval_key)
-            eval_ret = float(eval_ret)
-            returns.append(eval_ret)
+        if vmap_population:
+            # One fused call trains + evals every candidate in parallel.
+            returns, policy_batched, _ = evaluate(population, train_keys, eval_key)
 
-            if eval_ret > gen_best_return:
-                gen_best_return = eval_ret
-                gen_best_morph  = cand
-            if eval_ret > best_return:
-                best_return = eval_ret
-                best_policy = jax.device_get(policy_params)
-                best_morph  = jax.device_get(cand)
+            def policy_at(i, _pb=policy_batched):
+                return jax.tree_util.tree_map(lambda x: x[i], _pb)
+        else:
+            rets, policies = [], []
+            for i in range(popsize):
+                cand = jax.tree_util.tree_map(lambda x: x[i], population)
+                eval_ret, policy_params, _ = evaluate(cand, train_keys[i], eval_key)
+                rets.append(eval_ret)
+                policies.append(policy_params)
+            returns = jnp.stack(rets)
 
-        returns = jnp.asarray(returns)
+            def policy_at(i, _ps=policies):
+                return _ps[i]
+
         # evosax minimises fitness -> negate the (maximised) return.
         es_state, _ = strategy.tell(tell_key, population, -returns, es_state, es_params)
 
-        gen_mean_return = float(jnp.mean(returns))
+        returns_host   = jax.device_get(returns)             # (popsize,)
+        gen_best_i      = int(returns_host.argmax())
+        gen_best_return = float(returns_host[gen_best_i])
+        gen_mean_return = float(returns_host.mean())
+        gen_best_morph  = jax.tree_util.tree_map(lambda x: x[gen_best_i], population)
+
+        if gen_best_return > best_return:
+            best_return = gen_best_return
+            best_policy = jax.device_get(policy_at(gen_best_i))
+            best_morph  = jax.device_get(gen_best_morph)
+
         if gen % log_every == 0 or gen == generations - 1:
             log_data = {
                 "generation":      gen,
