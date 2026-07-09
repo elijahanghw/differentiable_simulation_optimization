@@ -75,8 +75,10 @@ evolution:
   popsize: 10             # candidates per generation
   generations: 50         # outer CMA-ES steps
   sigma0: 0.5             # initial genotype std over the raw pre-sigmoid params
-  inner_epochs: 2000       # BPTT epochs to train each candidate's policy
+  inner_epochs: 2000       # BPTT epochs to train each candidate (gen 0 / cold start)
   vmap_population: true    # train+eval all candidates in parallel (fast, higher GPU memory)
+  warm_start: true         # gens 1+ seed every candidate from the prev gen's best policy
+  warm_inner_epochs: 500   # BPTT epochs when warm-starting (fewer, since fine-tuning)
 
 # -----------------------------------------------------------------------
 # Depth camera

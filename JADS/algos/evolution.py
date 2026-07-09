@@ -69,57 +69,87 @@ def _make_strategy(name: str, population_size: int, solution):
 # Inner-loop evaluator: train a fresh policy for a fixed morphology, then eval
 # ---------------------------------------------------------------------------
 
-def _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape, vmap_population=False):
+def _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape,
+                    vmap_population=False, warm_inner_epochs=None):
+    """Build the inner-loop evaluators.
+
+    Returns ``(cold_eval, warm_eval)``:
+      * ``cold_eval`` initialises a fresh policy (``init_params``) and trains it
+        for ``inner_epochs`` -- used for the first generation.
+      * ``warm_eval`` seeds the policy from a supplied ``seed_policy`` (the best
+        policy of the previous generation) and fine-tunes it for
+        ``warm_inner_epochs`` -- used for every subsequent generation. The seed
+        is shared across the population (``in_axes=None``) so all candidates
+        start from the same incumbent.
+
+    The two differ in scan length (and whether they call ``init_params``), so
+    they compile as separate jitted functions.
+    """
     horizon    = tcfg["horizon"]
     batch_size = tcfg["batch_size"]
     eval_batch = tcfg.get("eval_batch_size", 2 * batch_size)
     lr         = tcfg["lr"]
     lr_min     = tcfg.get("lr_min", lr * 0.1)
     grad_clip  = tcfg.get("grad_clip", 1.0)
+    warm_inner_epochs = warm_inner_epochs or inner_epochs
 
     # loss_fn(policy_params, morph_params, init_states, init_obs) -> (loss, ret)
     loss_fn = _build_loss_fn_morph(env, policy, horizon)
     # Only the policy is differentiated; the morphology is fixed for the whole
     # inner run (the outer ES owns it).
     grad_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
-
-    schedule  = optax.linear_schedule(init_value=lr, end_value=lr_min, transition_steps=inner_epochs)
-    optimizer = optax.chain(optax.clip_by_global_norm(grad_clip), optax.adam(schedule))
     reset_vmap = jax.vmap(env.reset)
 
-    def evaluate(morph_params, train_key, eval_key):
-        """Train a fresh policy for `morph_params`, return (eval_return,
-        policy_params, final_train_return). `eval_key` is shared across a
-        generation's candidates (common random numbers) for fair comparison."""
-        init_key, scan_key = jax.random.split(train_key)
-        policy_params = init_params(policy, init_key, env.obs_dim, depth_shape=depth_shape)
-        opt_state     = optimizer.init(policy_params)
-        epoch_keys    = jax.random.split(scan_key, inner_epochs)
+    def _build(n_epochs, warm):
+        # LR schedule rescaled to this variant's epoch budget.
+        schedule  = optax.linear_schedule(init_value=lr, end_value=lr_min,
+                                           transition_steps=n_epochs)
+        optimizer = optax.chain(optax.clip_by_global_norm(grad_clip), optax.adam(schedule))
 
-        def epoch_step(carry, ek):
-            pp, os = carry
-            obs, states, _ = reset_vmap(jax.random.split(ek, batch_size))
-            (loss, ret), grads = grad_fn(pp, morph_params, states, obs)
-            updates, os = optimizer.update(grads, os)
-            pp = optax.apply_updates(pp, updates)
-            return (pp, os), ret
+        def evaluate(morph_params, train_key, eval_key, seed_policy=None):
+            """Train a policy for `morph_params`, return (eval_return,
+            policy_params, final_train_return). `eval_key` is shared across a
+            generation's candidates (common random numbers) for fair
+            comparison. When `warm`, the policy is seeded from `seed_policy`
+            instead of a fresh random init."""
+            init_key, scan_key = jax.random.split(train_key)
+            if warm:
+                policy_params = seed_policy
+            else:
+                policy_params = init_params(policy, init_key, env.obs_dim, depth_shape=depth_shape)
+            opt_state     = optimizer.init(policy_params)
+            epoch_keys    = jax.random.split(scan_key, n_epochs)
 
-        (policy_params, _), train_rets = jax.lax.scan(
-            epoch_step, (policy_params, opt_state), epoch_keys
-        )
+            def epoch_step(carry, ek):
+                pp, os = carry
+                obs, states, _ = reset_vmap(jax.random.split(ek, batch_size))
+                (loss, ret), grads = grad_fn(pp, morph_params, states, obs)
+                updates, os = optimizer.update(grads, os)
+                pp = optax.apply_updates(pp, updates)
+                return (pp, os), ret
 
-        # Held-out evaluation on fresh episodes.
-        eobs, estates, _ = reset_vmap(jax.random.split(eval_key, eval_batch))
-        _, eval_ret = loss_fn(policy_params, morph_params, estates, eobs)
-        return eval_ret, policy_params, train_rets[-1]
+            (policy_params, _), train_rets = jax.lax.scan(
+                epoch_step, (policy_params, opt_state), epoch_keys
+            )
 
-    if vmap_population:
-        # Train + evaluate the whole population in parallel. morph_params and
-        # train_key are batched over the population axis; eval_key is shared
-        # (common random numbers across candidates). Returns are batched:
-        # eval_ret (popsize,), policy_params leaves (popsize, ...).
-        evaluate = jax.vmap(evaluate, in_axes=(0, 0, None))
-    return jax.jit(evaluate)
+            # Held-out evaluation on fresh episodes.
+            eobs, estates, _ = reset_vmap(jax.random.split(eval_key, eval_batch))
+            _, eval_ret = loss_fn(policy_params, morph_params, estates, eobs)
+            return eval_ret, policy_params, train_rets[-1]
+
+        if vmap_population:
+            # Train + evaluate the whole population in parallel. morph_params and
+            # train_key are batched over the population axis; eval_key (and the
+            # warm seed_policy) are shared -- common random numbers / common
+            # incumbent across candidates. Returns are batched: eval_ret
+            # (popsize,), policy_params leaves (popsize, ...).
+            in_axes = (0, 0, None, None) if warm else (0, 0, None)
+            evaluate = jax.vmap(evaluate, in_axes=in_axes)
+        return jax.jit(evaluate)
+
+    cold_eval = _build(inner_epochs, warm=False)
+    warm_eval = _build(warm_inner_epochs, warm=True)
+    return cold_eval, warm_eval
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +169,8 @@ def train(config: Dict[str, Any]) -> Any:
     sigma0        = evcfg.get("sigma0", 0.5)
     inner_epochs  = evcfg.get("inner_epochs", tcfg.get("epochs", 200))
     vmap_population = evcfg.get("vmap_population", False)
+    warm_start    = evcfg.get("warm_start", True)
+    warm_inner_epochs = evcfg.get("warm_inner_epochs", max(1, inner_epochs // 4))
     log_every     = tcfg.get("log_interval", 1)
 
     # -- Environment --------------------------------------------------------
@@ -171,8 +203,10 @@ def train(config: Dict[str, Any]) -> Any:
     key, es_key = jax.random.split(key)
     es_state = strategy.init(es_key, solution, es_params)
 
-    evaluate = _make_evaluator(env, policy, tcfg, inner_epochs, depth_shape,
-                               vmap_population=vmap_population)
+    cold_eval, warm_eval = _make_evaluator(
+        env, policy, tcfg, inner_epochs, depth_shape,
+        vmap_population=vmap_population, warm_inner_epochs=warm_inner_epochs,
+    )
 
     # -- Logger -------------------------------------------------------------
     log_cfg   = config.get("logging", {})
@@ -195,6 +229,11 @@ def train(config: Dict[str, Any]) -> Any:
     print(f"Outer        : popsize={popsize}  generations={generations}  "
           f"eval={'vmap over population' if vmap_population else 'sequential'}")
     print(f"Inner        : BPTT epochs={inner_epochs}  horizon={tcfg['horizon']}  batch={tcfg['batch_size']}")
+    if warm_start:
+        print(f"Warm start   : ON  |  gen 0 cold ({inner_epochs} ep), gens 1+ seed "
+              f"prev-gen best ({warm_inner_epochs} ep)")
+    else:
+        print(f"Warm start   : OFF |  every gen trains fresh ({inner_epochs} ep)")
     print("-" * 60)
 
     # -- Persistent XLA compilation cache ----------------------------------
@@ -209,6 +248,7 @@ def train(config: Dict[str, Any]) -> Any:
     best_return = -math.inf
     best_policy = None
     best_morph  = None
+    warm_seed   = None   # previous generation's best policy (kept on device)
 
     for gen in range(generations):
         key, ask_key, tell_key, eval_key, train_key = jax.random.split(key, 5)
@@ -218,9 +258,16 @@ def train(config: Dict[str, Any]) -> Any:
         # distinct train/init key per candidate.
         train_keys = jax.random.split(train_key, popsize)
 
+        # Gen 0 is always a cold start; subsequent gens warm-start every
+        # candidate from the previous generation's best policy (shared seed).
+        use_warm = warm_start and gen > 0
+
         if vmap_population:
             # One fused call trains + evals every candidate in parallel.
-            returns, policy_batched, _ = evaluate(population, train_keys, eval_key)
+            if use_warm:
+                returns, policy_batched, _ = warm_eval(population, train_keys, eval_key, warm_seed)
+            else:
+                returns, policy_batched, _ = cold_eval(population, train_keys, eval_key)
 
             def policy_at(i, _pb=policy_batched):
                 return jax.tree_util.tree_map(lambda x: x[i], _pb)
@@ -228,7 +275,10 @@ def train(config: Dict[str, Any]) -> Any:
             rets, policies = [], []
             for i in range(popsize):
                 cand = jax.tree_util.tree_map(lambda x: x[i], population)
-                eval_ret, policy_params, _ = evaluate(cand, train_keys[i], eval_key)
+                if use_warm:
+                    eval_ret, policy_params, _ = warm_eval(cand, train_keys[i], eval_key, warm_seed)
+                else:
+                    eval_ret, policy_params, _ = cold_eval(cand, train_keys[i], eval_key)
                 rets.append(eval_ret)
                 policies.append(policy_params)
             returns = jnp.stack(rets)
@@ -244,10 +294,15 @@ def train(config: Dict[str, Any]) -> Any:
         gen_best_return = float(returns_host[gen_best_i])
         gen_mean_return = float(returns_host.mean())
         gen_best_morph  = jax.tree_util.tree_map(lambda x: x[gen_best_i], population)
+        gen_best_policy = policy_at(gen_best_i)              # device pytree
+
+        # Seed the next generation with this generation's best policy.
+        if warm_start:
+            warm_seed = gen_best_policy
 
         if gen_best_return > best_return:
             best_return = gen_best_return
-            best_policy = jax.device_get(policy_at(gen_best_i))
+            best_policy = jax.device_get(gen_best_policy)
             best_morph  = jax.device_get(gen_best_morph)
 
         if gen % log_every == 0 or gen == generations - 1:
