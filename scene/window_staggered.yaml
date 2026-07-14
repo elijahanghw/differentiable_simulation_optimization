@@ -1,0 +1,23 @@
+# Staggered window course — several fixed openings the drone must slalom through.
+# All windows share one size (window_w/h/border/depth); only positions differ.
+# Positions are deterministic: no randomness is applied to window placement.
+arena_x_min:  2.0
+arena_x_max:  8.0
+arena_y_min: -5.0
+arena_y_max:  5.0
+arena_z_min: -4.0
+arena_z_max: -0.5
+
+# Hand-placed openings, each [x, y, z] in world (NED) coords.
+# y alternates left/right and z alternates high/low to force a 3D slalom.
+n_windows: 4
+window_positions:
+  - [2.0, 0.75, -1.5]
+  - [4.0, -0.75, -1.5]
+  - [6.0, 0.75, -1.5]
+  - [8.0, -0.75, -1.5]
+
+window_w:      1.5   # opening width  (y)
+window_h:      1.5   # opening height (z)
+window_border: 3     # solid border around opening
+window_depth:  1     # wall thickness (x)
