@@ -3,6 +3,7 @@
 # -----------------------------------------------------------------------
 env:
   name: navigate
+  dt: 0.01                # physics/policy timestep (100 Hz loop)
   integrator: semi_implicit_euler
   train_morphology: true
   morph_init_scale: 1.0
@@ -62,7 +63,11 @@ training:
   morph_epochs: 3000
   morphological_loss: true
   morphological_loss_weight: 500.0
-  horizon: 250
+  horizon: 200
+  # ---- Truncated BPTT (persistent carry across epochs) -------------------
+  persistent_carry: true   # thread (state, obs, hidden, age) across epochs
+  reset_on_crash:   true   # per-element in-scan reset when dist < 0 (collision)
+  max_episode_len:  2000   # force-reset an element after this many steps (0 = unbounded)
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-5
@@ -81,6 +86,7 @@ depth_camera:
   min_range: 0.3        # m  — closer than this → 0 (blind zone)
   max_range: 3.0        # m  — farther / no-hit → max_range (saturated)
   quantization_m: 0.001 # m  — depth step size (1 mm, matches uint16 output)
+  cam_hz: 10.0          # Hz — depth update rate (dt=0.01 → 100 Hz loop → frame_skip=10)
 
 # -----------------------------------------------------------------------
 # Logging

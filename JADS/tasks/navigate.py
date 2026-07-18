@@ -441,6 +441,12 @@ class Navigate:
             "target_pos": next_state[19:22],
             "omega":      next_state[10:13],
             "dist":       dist,
+            # Collision flag for per-element resets in persistent-carry BPTT:
+            # negative signed distance means the body/motor sphere has
+            # penetrated an obstacle or the ground. stop_gradient'd so it only
+            # gates the reset select and never leaks a gradient (the loss uses
+            # the smooth `dist` itself, not this threshold).
+            "crashed":    jax.lax.stop_gradient(dist < 0.0),
         }
         obs = self._get_obs(next_state, arrays=arrays, step_idx=step_idx, prev_depth=prev_depth)
         return next_state, obs, step_data
@@ -488,7 +494,7 @@ class Navigate:
             (self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:]))) * v_to_pt
         )
         loss_obj = jnp.mean(
-            (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
+            (jax.nn.relu(0.2 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
         total = (self.xy_weight*loss_xy + self.z_weight*loss_z
