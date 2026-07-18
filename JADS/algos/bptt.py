@@ -20,17 +20,21 @@ Two rollout regimes (selected by training.persistent_carry)
     aged one — not just steps 0..horizon from a zero hidden state — so the
     policy stays in-distribution far past ``horizon`` at eval.
 
-    Resets happen per element *inside* the scan, never a whole-window reset:
-      - reset_on_crash (default true): an element whose step reports
-        ``step_data["crashed"]`` is re-seeded via env.reset the same step.
-      - max_episode_len (default 0 = unbounded): an element that has flown this
-        many steps without crashing is force-reset, keeping the fresh-reset
-        state diversity from env.reset present in training as the policy
-        improves. Age is tracked in the carry (the flat-array states carry no
-        time field of their own).
-    A reset re-inits that element's state / obs / hidden / age together and cuts
-    the gradient there — the reset select is a clean gradient boundary, so we
-    never backprop across a reset.
+    Resets happen per element at the *epoch boundary* (the truncation boundary),
+    never inside the scan — so we pay one batched env.reset (one depth render for
+    depth envs) per epoch, not one per step:
+      - reset_on_crash (default true): an element that reports
+        ``step_data["crashed"]`` anywhere in the window is re-seeded for the next
+        epoch. It keeps flying to the end of the current window; its collision
+        loss still supplies the away-from-obstacle gradient.
+      - max_episode_len (default 0 = unbounded): an element whose carried age has
+        reached this many steps is force-reset, keeping the fresh-reset state
+        diversity from env.reset present in training as the policy improves. Age
+        is tracked in the carry (the flat-array states carry no time field of
+        their own); the cap is thus checked at horizon granularity.
+    A reset re-inits that element's state / obs / hidden / age together for the
+    next epoch; the carry is stop_gradient'd at every epoch boundary regardless,
+    so no gradient ever crosses a reset.
 
 Environment contract
 --------------------
@@ -64,10 +68,10 @@ from JADS.utils.checkpoint import save as save_checkpoint
 def _init_carry(env, policy, reset_fn, keys, has_hidden):
     """Build a fresh batched rollout carry from a batch of reset keys.
 
-    The carry is a dict so per-element resets (below) are a single tree_map and
-    the shape stays self-documenting: state, obs, an integer age (steps since
-    that element last reset — also used as the depth-render step index), and,
-    for recurrent policies, the hidden state.
+    The carry is a dict so the epoch-boundary reset (below) is a single tree_map
+    and the shape stays self-documenting: state, obs, a per-element integer age
+    (steps since that element last reset — used for the max_episode_len cap),
+    and, for recurrent policies, the hidden state.
     """
     obs, states, _ = reset_fn(keys)
     batch = keys.shape[0]
@@ -82,8 +86,8 @@ def _init_carry(env, policy, reset_fn, keys, has_hidden):
 # Loss function
 # ---------------------------------------------------------------------------
 
-def _build_loss_fn(env, policy, reset_on_crash: bool, max_episode_len: int):
-    """Build ``loss_fn(policy_params, morph_matrices, carry, reset_keys)``.
+def _build_loss_fn(env, policy, horizon: int):
+    """Build ``loss_fn(policy_params, morph_matrices, carry)``.
 
     One scan-based rollout covers every combination of {morph, no-morph} ×
     {recurrent, feed-forward} × {depth, plain}. ``morph_matrices`` is supplied
@@ -92,15 +96,28 @@ def _build_loss_fn(env, policy, reset_on_crash: bool, max_episode_len: int):
 
     The rollout threads a persistent carry and returns the final carry, so the
     training loop can either discard it (fresh-batch BPTT) or feed it back
-    detached (persistent-carry / truncated BPTT). Per-element in-scan resets are
-    only compiled in when ``reset_on_crash`` or ``max_episode_len`` is active.
+    detached (persistent-carry / truncated BPTT). Resets are **not** done inside
+    the scan — a crashing/aged element keeps flying to the end of the window
+    (its collision loss still supplies the gradient), and the loop resets it at
+    the epoch boundary (_apply_epoch_resets), which is the truncation boundary
+    anyway. This avoids an env.reset — and, for depth envs, a full depth render —
+    on every single step. To that end, if ``step_data`` carries a "crashed"
+    flag, the loss exposes a per-element ``crashed_any`` (did this element crash
+    anywhere in the window) alongside the final ``age`` in the carry.
     """
     has_hidden = hasattr(policy, "init_hidden")
     has_depth  = hasattr(policy, "conv_features")
-    do_reset   = reset_on_crash or max_episode_len > 0
 
-    def single_rollout(policy_params, morph_matrices, carry0, reset_keys):
-        def step(carry, rkey):
+    def single_rollout(policy_params, morph_matrices, carry0):
+        # step_idx is the scan index (jnp.arange below): the SAME scalar for
+        # every batch element at a given step. It drives the depth-render
+        # zero-order-hold cadence, and being uniform across the vmap batch it
+        # keeps env's `should_render` cond a real conditional — depth renders
+        # once per frame_skip steps. (Threading the per-element `age` here
+        # instead would make the predicate batched, so vmap lowers cond→select
+        # and renders every step — ~frame_skip× the work.) `age` is per-element
+        # and used only for the max_episode_len reset at the epoch boundary.
+        def step(carry, step_idx):
             state, obs, age = carry["state"], carry["obs"], carry["age"]
             if has_hidden:
                 hidden = carry["hidden"]
@@ -110,7 +127,7 @@ def _build_loss_fn(env, policy, reset_on_crash: bool, max_episode_len: int):
                         {"params": policy_params}, depth_img, obs_vec, hidden)
                     new_state, new_obs, step_data = env.step(
                         state, action, morph_matrices=morph_matrices,
-                        step_idx=age, prev_depth=depth_img,
+                        step_idx=step_idx, prev_depth=depth_img,
                     )
                 else:
                     action, new_hidden = policy.apply(
@@ -122,45 +139,55 @@ def _build_loss_fn(env, policy, reset_on_crash: bool, max_episode_len: int):
                 new_state, new_obs, step_data = env.step(
                     state, action, morph_matrices=morph_matrices)
 
-            new_age = age + 1
-            if do_reset:
-                # One per-element reset mask over both triggers. Both are clean
-                # gradient cuts: "crashed" is stop_gradient'd and age is a
-                # discrete counter, so the select below never backprops a reset.
-                should_reset = jnp.zeros((), dtype=bool)
-                if reset_on_crash and "crashed" in step_data:
-                    should_reset = should_reset | step_data["crashed"]
-                if max_episode_len > 0:
-                    should_reset = should_reset | (new_age >= max_episode_len)
-
-                r_obs, r_state, _ = env.reset(rkey)
-                sel = lambda a, b: jnp.where(should_reset, a, b)
-                new_state = jax.tree_util.tree_map(sel, r_state, new_state)
-                new_obs   = jax.tree_util.tree_map(sel, r_obs, new_obs)
-                new_age   = jnp.where(should_reset, jnp.zeros_like(new_age), new_age)
-                if has_hidden:
-                    # Reset hidden TOGETHER with state — never fly a fresh
-                    # position on a stale memory.
-                    new_hidden = jnp.where(should_reset, policy.init_hidden(), new_hidden)
-
-            new_carry = {"state": new_state, "obs": new_obs, "age": new_age}
+            new_carry = {"state": new_state, "obs": new_obs, "age": age + 1}
             if has_hidden:
                 new_carry["hidden"] = new_hidden
             return new_carry, step_data
 
-        return jax.lax.scan(step, carry0, reset_keys)
+        return jax.lax.scan(step, carry0, jnp.arange(horizon))
 
-    batch_rollout = jax.vmap(single_rollout, in_axes=(None, None, 0, 0))
+    batch_rollout = jax.vmap(single_rollout, in_axes=(None, None, 0))
 
-    def loss_fn(policy_params, morph_matrices, carry, reset_keys):
-        final_carry, traj = batch_rollout(policy_params, morph_matrices, carry, reset_keys)
+    def loss_fn(policy_params, morph_matrices, carry):
+        final_carry, traj = batch_rollout(policy_params, morph_matrices, carry)
         total_loss, mean_return = env.compute_loss(traj)
         aux = {"mean_return": mean_return, "final_carry": final_carry}
         if "crashed" in traj:
-            aux["crash_frac"] = jnp.mean(traj["crashed"])
+            # traj["crashed"] is (batch, horizon); reduce over the window so the
+            # loop can reset every element that crashed at any point in it.
+            aux["crashed_any"] = jnp.any(traj["crashed"], axis=1)
+            aux["crash_frac"]  = jnp.mean(traj["crashed"])
         return total_loss, aux
 
     return loss_fn
+
+
+def _apply_epoch_resets(carry, crashed_any, max_episode_len, reset_fn, keys,
+                        has_hidden, policy):
+    """Re-seed elements that crashed in the window or hit the age cap.
+
+    Runs once per epoch on the *detached* carry, outside the differentiated
+    rollout — so it costs a single batched env.reset (one depth render for depth
+    envs), not one per step. A reset re-inits that element's state / obs / age
+    (and hidden) together; unaffected elements carry straight on.
+    """
+    should_reset = jnp.zeros(carry["age"].shape, dtype=bool)
+    if crashed_any is not None:
+        should_reset = should_reset | crashed_any
+    if max_episode_len > 0:
+        should_reset = should_reset | (carry["age"] >= max_episode_len)
+
+    r_obs, r_state, _ = reset_fn(keys)
+    reset_vals = {"state": r_state, "obs": r_obs, "age": jnp.zeros_like(carry["age"])}
+    if has_hidden:
+        reset_vals["hidden"] = jnp.broadcast_to(policy.init_hidden(), carry["hidden"].shape)
+
+    def sel(new, old):
+        mask = should_reset.reshape((should_reset.shape[0],) + (1,) * (old.ndim - 1))
+        return jnp.where(mask, new, old)
+
+    new_carry = jax.tree_util.tree_map(sel, reset_vals, carry)
+    return new_carry, jnp.mean(should_reset)
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +257,14 @@ def train(config: Dict[str, Any]) -> Any:
             optax.adam(morph_schedule, b1=0.5, b2=0.99),
         )
         morph_opt_state = morph_optimizer.init(morph_params)
-        loss_fn = _build_loss_fn(env, policy, reset_on_crash, max_episode_len)
+        loss_fn = _build_loss_fn(env, policy, horizon)
 
         # Differentiate w.r.t. both policy and morphology. morph_matrices is
         # derived from morph_params *inside* the differentiated function so its
         # gradient flows; it is constant across the rollout, computed once.
-        def _rollout_loss(policy_params, morph_params, carry, reset_keys):
+        def _rollout_loss(policy_params, morph_params, carry):
             morph_matrices = env.compute_morphology(morph_params)
-            return loss_fn(policy_params, morph_matrices, carry, reset_keys)
+            return loss_fn(policy_params, morph_matrices, carry)
         grad_fn = jax.jit(jax.value_and_grad(_rollout_loss, argnums=(0, 1), has_aux=True))
 
         has_morphological_loss = (
@@ -260,11 +287,11 @@ def train(config: Dict[str, Any]) -> Any:
                 )
             morphological_grad_fn = jax.jit(jax.value_and_grad(_morphological_loss_fn))
     else:
-        loss_fn = _build_loss_fn(env, policy, reset_on_crash, max_episode_len)
+        loss_fn = _build_loss_fn(env, policy, horizon)
         # No morphology to train: derived matrices are constant, computed once.
         morph_matrices = env.compute_morphology()
-        def _rollout_loss(policy_params, carry, reset_keys):
-            return loss_fn(policy_params, morph_matrices, carry, reset_keys)
+        def _rollout_loss(policy_params, carry):
+            return loss_fn(policy_params, morph_matrices, carry)
         grad_fn = jax.jit(jax.value_and_grad(_rollout_loss, has_aux=True))
 
     # -- Logger -------------------------------------------------------------
@@ -274,6 +301,8 @@ def train(config: Dict[str, Any]) -> Any:
     fields = ["epoch", "mean_return", "loss", "grad_norm"]
     if reset_on_crash:
         fields += ["crash_frac"]
+    if persistent_carry and (reset_on_crash or max_episode_len > 0):
+        fields += ["reset_frac"]
     if has_morph and use_morph_loss:
         fields += ["morphological_loss"]
     if has_morph and has_morph_info:
@@ -319,19 +348,16 @@ def train(config: Dict[str, Any]) -> Any:
     key, ck = jax.random.split(key)
     carry = _init_carry(env, policy, reset_fn, jax.random.split(ck, batch_size), has_hidden)
 
+    do_reset = reset_on_crash or max_episode_len > 0  # epoch-boundary resets
+
     for epoch in range(epochs):
         if not persistent_carry:
             key, ck = jax.random.split(key)
             carry = _init_carry(env, policy, reset_fn, jax.random.split(ck, batch_size), has_hidden)
 
-        # One fresh reset key per (element, step) for the in-scan crash/age
-        # reset (a no-op consumed as scan xs when resets are disabled).
-        key, rk = jax.random.split(key)
-        reset_keys = jax.random.split(rk, batch_size * horizon).reshape(batch_size, horizon, 2)
-
         if has_morph:
             (loss, aux), (policy_grads, morph_grads) = grad_fn(
-                policy_params, morph_params, carry, reset_keys
+                policy_params, morph_params, carry
             )
             policy_grad_norm = optax.global_norm(policy_grads)
 
@@ -351,16 +377,24 @@ def train(config: Dict[str, Any]) -> Any:
                 )
                 morph_params = optax.apply_updates(morph_params, morph_updates)
         else:
-            (loss, aux), policy_grads = grad_fn(policy_params, carry, reset_keys)
+            (loss, aux), policy_grads = grad_fn(policy_params, carry)
             policy_grad_norm = optax.global_norm(policy_grads)
 
             policy_updates, policy_opt_state = policy_optimizer.update(policy_grads, policy_opt_state)
             policy_params = optax.apply_updates(policy_params, policy_updates)
 
         # Truncate: detach the carry so next epoch backprops only its own
-        # horizon window, never into this one.
+        # horizon window, never into this one. Then, at this boundary, re-seed
+        # the elements that crashed in the window or hit the age cap — one
+        # batched env.reset, not a per-step one.
+        reset_frac = 0.0
         if persistent_carry:
             carry = jax.lax.stop_gradient(aux["final_carry"])
+            if do_reset:
+                key, ck = jax.random.split(key)
+                carry, reset_frac = _apply_epoch_resets(
+                    carry, aux.get("crashed_any"), max_episode_len, reset_fn,
+                    jax.random.split(ck, batch_size), has_hidden, policy)
 
         if epoch % log_every == 0 or epoch == epochs - 1:
             log_data = {
@@ -371,6 +405,8 @@ def train(config: Dict[str, Any]) -> Any:
             }
             if reset_on_crash:
                 log_data["crash_frac"] = float(aux.get("crash_frac", 0.0))
+            if do_reset:
+                log_data["reset_frac"] = float(reset_frac)
             if has_morph and has_morphological_loss:
                 log_data["morphological_loss"] = float(morphological_loss)
             if has_morph and has_morph_info:
