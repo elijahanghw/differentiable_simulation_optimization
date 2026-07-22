@@ -6,7 +6,7 @@ env:
   dt: 0.01                # physics/policy timestep (100 Hz loop)
   integrator: semi_implicit_euler
   train_morphology: true
-  morph_init_scale: 0.0
+  morph_init_scale: 0.5
   alternating_phi: false
   phi_default: 0.0
   grad_decay: 0.4
@@ -58,15 +58,15 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 4000
-  morph_epochs: 3000
+  epochs: 3000
+  morph_epochs: 2000
   morphological_loss: true
-  morphological_loss_weight: 500.0
+  morphological_loss_weight: 200.0
   horizon: 200
   # ---- Truncated BPTT (persistent carry across epochs) -------------------
   persistent_carry: true   # thread (state, obs, hidden, age) across epochs
   reset_on_crash:   true   # per-element in-scan reset when dist < 0 (collision)
-  max_episode_len:  2000   # force-reset an element after this many steps (0 = unbounded)
+  max_episode_len:  1000   # force-reset an element after this many steps (0 = unbounded)
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-5

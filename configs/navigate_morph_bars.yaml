@@ -70,7 +70,7 @@ training:
   # ---- Truncated BPTT (persistent carry across epochs) -------------------
   persistent_carry: true   # thread (state, obs, hidden, age) across epochs
   reset_on_crash:   true   # per-element in-scan reset when dist < 0 (collision)
-  max_episode_len:  2000   # force-reset an element after this many steps (0 = unbounded)
+  max_episode_len:  1000   # force-reset an element after this many steps (0 = unbounded)
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-4

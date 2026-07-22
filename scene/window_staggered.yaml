@@ -17,7 +17,7 @@ window_positions:
   - [6.0, 0.75, -1.5]
   - [8.0, -0.75, -1.5]
 
-window_w:      1.5   # opening width  (y)
-window_h:      1.5   # opening height (z)
-window_border: 3     # solid border around opening
+window_w:      2.0   # opening width  (y)
+window_h:      2.0   # opening height (z)
+window_border: 2     # solid border around opening
 window_depth:  1     # wall thickness (x)
