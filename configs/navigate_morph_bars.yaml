@@ -32,8 +32,8 @@ env:
   init_z_max: -1.6
 
   # ---- Target spawn bounds -----------------------------------------------
-  target_x_min: 25.0
-  target_x_max: 30.0
+  target_x_min: 15.0
+  target_x_max: 20.0
   target_y_min: -10.0
   target_y_max: 10.0
   target_z_min: -1.5
