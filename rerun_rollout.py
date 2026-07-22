@@ -288,7 +288,7 @@ def _get_all_obstacles_for_region(scene_cfg, seed_float, x_min, x_max, y_min, y_
                     phis_b    = phi_off + b * 2 * _math.pi / 3
                     b_ax      = np.stack([sin_t * np.cos(phis_b),
                                           sin_t * np.sin(phis_b),
-                                          -cos_t], axis=-1)  # (Mt, 3)
+                                          np.full_like(phis_b, -cos_t)], axis=-1)  # (Mt, 3)
                     trunk_top = np.stack([t_x, t_y, -2.0 * t_trunk_hh], axis=-1)
                     b_c       = trunk_top + t_branch_hh[:, None] * b_ax   # (Mt, 3)
                     b_he      = np.stack([t_branch_r, t_branch_r, t_branch_hh], axis=-1)
