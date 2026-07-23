@@ -2,7 +2,7 @@
 arena_z_min: -4.5
 arena_z_max: 0.0
 
-boxes_per_cell: 6
+boxes_per_cell: 4
 
 box_hx_min: 0.30
 box_hx_max: 0.50
