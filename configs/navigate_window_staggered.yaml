@@ -16,11 +16,11 @@ env:
   z_weight:         2.0
   vel_weight:       0.2
   rate_weight:      0.1
-  collision_weight: 7.5
-  obj_weight:       1.0
-  heading_weight:   10.0
+  collision_weight: 10.0
+  obj_weight:       8.0
+  heading_weight:   30.0
   b1: 1.0
-  b2: 32.0
+  b2: 16.0
 
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
