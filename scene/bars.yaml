@@ -1,8 +1,26 @@
 # Bars — Long boxes.
-arena_z_min: -4.5
-arena_z_max: 0.0
+# arena_z_min: -4.5
+# arena_z_max: 0.0
 
-boxes_per_cell: 4
+# boxes_per_cell: 4
+
+# box_hx_min: 0.30
+# box_hx_max: 0.50
+# box_hy_min: 1.50
+# box_hy_max: 2.00
+# box_hz_min: 0.10
+# box_hz_max: 0.30
+
+arena_x_min:  2.0
+arena_x_max:  8.0
+arena_y_min: -3.0
+arena_y_max:  3.0
+arena_z_min: -4.5
+arena_z_max: -0.0
+
+n_spheres:  0
+n_boxes:    24
+n_capsules: 0
 
 box_hx_min: 0.30
 box_hx_max: 0.50
