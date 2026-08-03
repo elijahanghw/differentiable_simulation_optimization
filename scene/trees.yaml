@@ -16,7 +16,7 @@ arena_y_min: -3.0
 arena_y_max:  3.0
 
 n_spheres:  0
-n_trees:    20
+n_trees:    16
 n_capsules: 0
 
 tree_trunk_r_min: 0.07
