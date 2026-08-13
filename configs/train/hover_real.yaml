@@ -1,0 +1,48 @@
+# -----------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------
+env:
+  name: hover_real
+  dt: 0.01
+  integrator: semi_implicit_euler
+  drone: ../drone/2inchwhoop.yaml   # path is resolved relative to this file
+  # dr: 0.3                         # overrides the drone yaml's domain_randomization.dr
+  target_x: 3.0
+  target_y: 0.0
+  target_z: -1.5
+
+# -----------------------------------------------------------------------
+# Policy
+# -----------------------------------------------------------------------
+# A recurrent policy is the point of per-episode randomization: the airframe is
+# not observable from a single frame, so the GRU has to infer it from how the
+# drone responded over the last few steps.
+policy:
+  type: gru
+  squash_output: false
+  encoder_sizes: [64]
+  hidden_size: [64]
+  head_sizes: [64]
+
+# -----------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------
+training:
+  epochs: 3000
+  horizon: 200        # rollout length for BPTT
+  # ---- Truncated BPTT (persistent carry across epochs) -------------------
+  persistent_carry: true   # thread (state, obs, hidden, age) across epochs
+  reset_on_crash:   true   # per-element in-scan reset when dist < 0 (collision)
+  max_episode_len:  1000   # force-reset an element after this many steps (0 = unbounded)
+  batch_size: 64
+  lr: 1.0e-3
+  lr_min: 1.0e-4
+  grad_clip: 1.0
+  log_interval: 50
+
+# -----------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------
+logging:
+  csv_path: logs/hover_real_dr.csv
+  checkpoint_path: checkpoints/hover_real_dr.pkl

@@ -1,0 +1,56 @@
+drone_params:
+  # Thrust coefficients
+  k_wx: 0.0
+  k_x:  -6.51e-05   # lateral drag coefficient (x)
+  k_wy: 0.0
+  k_y:  -6.32e-05   # lateral drag coefficient (y)
+  k_wz:  5.07e-07   # vertical thrust coefficient
+  k_z:  0.0
+
+  # k_angle: 0.0
+  # k_hor: 0.0
+  # k_v2: 0.0
+
+  # Roll moment coefficients (one per motor)
+  k_p:  [-1.62e-05, -1.63e-05,  1.60e-05,  1.58e-05]
+  k_pd: [0.0, 0.0, 0.0, 0.0]
+  # Jx: 0.0
+
+  # Pitch moment coefficients
+  k_q:  [-8.10e-06,  1.07e-05, -9.93e-06,  9.14e-06]
+  k_qd: [0.0, 0.0, 0.0, 0.0]
+  # Jy: 0.0
+
+  # Yaw moment coefficients
+  k_r:  [-3.08e-06,  2.01e-06,  3.19e-06, -2.32e-06]
+  # Yaw moment derivative coefficients
+  k_rd: [-1.37e-03,  1.37e-03,  1.37e-03, -1.37e-03]
+  # J_z: 0.0
+
+  tau:   0.04      # motor time constant (s)
+  k:     0.8       # motor response curve parameter
+  w_min: 497.53    # minimum motor speed (rad/s)
+  w_max: 5200.73   # maximum motor speed (rad/s)
+
+  W_MIN_N: 0.0
+  W_MAX_N: 5000.0
+
+domain_randomization:
+  dr: 0.3
+
+# Physical layout. Visualisation only — the dynamics are driven entirely by the
+# identified coefficients above, which already fold in arm lengths and inertia.
+# Placeholder values for a 2" whoop (95 mm wheelbase, 2" props); replace with
+# measured numbers when you have them.
+geometry:
+  # FRD body frame (x forward, y right, z down), metres, relative to the CoM.
+  # Rows MUST follow the same motor order as the moment coefficients above:
+  # rear-right, front-right, rear-left, front-left.
+  motor_positions:
+    - [-0.0336,  0.0336, -0.010]   # rear  right
+    - [ 0.0336,  0.0336, -0.010]   # front right
+    - [-0.0336, -0.0336, -0.010]   # rear  left
+    - [ 0.0336, -0.0336, -0.010]   # front left
+  prop_diameter: 0.051   # 2 inch
+  body_radius:   0.030
+  body_height:   0.020

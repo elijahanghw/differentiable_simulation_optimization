@@ -6,7 +6,7 @@ env:
   dt: 0.01                # physics/policy timestep (100 Hz loop)
   integrator: semi_implicit_euler
   train_morphology: true
-  morph_init_scale: 0.4
+  morph_init_scale: 0.5
   alternating_phi: false
   phi_default: 0.0
   grad_decay: 0.4
@@ -16,34 +16,30 @@ env:
   z_weight:         2.0
   vel_weight:       0.2
   rate_weight:      0.1
-  collision_weight: 10.0 # 7.5
-  obj_weight:       8.0 # 3.0
+  collision_weight: 10.0
+  obj_weight:       8.0
   heading_weight:   30.0
   b1: 1.0
-  b2: 32.0
-
+  b2: 16.0
 
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: 0.0
-  init_x_max: 1.0
-  init_y_min: -1.0
-  init_y_max: 1.0
+  init_x_max: 0.5
+  init_y_min: -0.5
+  init_y_max: 0.5
   init_z_min: -1.4
   init_z_max: -1.6
 
   # ---- Target spawn bounds -----------------------------------------------
-  target_x_min: 9.0
+  target_x_min: 10.0
   target_x_max: 10.0
-  target_y_min: -1.0
-  target_y_max: 1.0
+  target_y_min: 0.0
+  target_y_max: 0.0
   target_z_min: -1.5
   target_z_max: -1.5
 
-  # ---- Scene (random obstacles) -----------------------------------------
-  # Path to a scene YAML in scene/ — or replace with an inline dict.
-  # scene: scene/obstacles_dense.yaml
-  scene: scene/bars.yaml
-
+  # ---- Scene (staggered fixed windows) -----------------------------------
+  scene: ../scene/window_staggered.yaml
 
 # -----------------------------------------------------------------------
 # Policy
@@ -66,16 +62,16 @@ training:
   morph_epochs: 2000
   morphological_loss: true
   morphological_loss_weight: 200.0
-  horizon: 250
+  horizon: 200
   # ---- Truncated BPTT (persistent carry across epochs) -------------------
   persistent_carry: true   # thread (state, obs, hidden, age) across epochs
   reset_on_crash:   true   # per-element in-scan reset when dist < 0 (collision)
   max_episode_len:  1000   # force-reset an element after this many steps (0 = unbounded)
   batch_size: 64
   lr: 1.0e-3
-  lr_min: 1.0e-4
-  morph_lr: 3.0e-3
-  morph_lr_min: 5.0e-4
+  lr_min: 1.0e-5
+  morph_lr: 1.0e-3
+  morph_lr_min: 1.0e-3
   grad_clip: 1.0
   log_interval: 50
 

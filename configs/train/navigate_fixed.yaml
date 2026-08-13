@@ -5,8 +5,7 @@ env:
   name: navigate
   dt: 0.01                # physics/policy timestep (100 Hz loop)
   integrator: semi_implicit_euler
-  train_morphology: true
-  morph_init_scale: 1.0
+  train_morphology: false
   alternating_phi: false
   phi_default: 0.0
   grad_decay: 0.4
@@ -18,7 +17,7 @@ env:
   rate_weight:      0.1
   collision_weight: 7.5
   obj_weight:       1.0
-  heading_weight:   10.0
+  heading_weight:   30.0
   b1: 1.0
   b2: 32.0
 
@@ -27,8 +26,8 @@ env:
   init_x_max: 1.0
   init_y_min: -2.0
   init_y_max: 2.0
-  init_z_min: -1.4
-  init_z_max: -1.6
+  init_z_min: -1.5
+  init_z_max: -1.5
 
   # ---- Target spawn bounds -----------------------------------------------
   target_x_min: 9.0
@@ -39,8 +38,9 @@ env:
   target_z_max: -1.5
 
   # ---- Scene (random obstacles) -----------------------------------------
-  # Path to a scene YAML in scene/ — or replace with an inline dict.
-  scene: scene/window_wide.yaml
+  # Path to a scene YAML in scene
+  # scene: ../scene/obstacles.yaml
+  scene: ../scene/columns.yaml
 
 # -----------------------------------------------------------------------
 # Policy
@@ -59,10 +59,7 @@ policy:
 # Training
 # -----------------------------------------------------------------------
 training:
-  epochs: 4000
-  morph_epochs: 3000
-  morphological_loss: true
-  morphological_loss_weight: 500.0
+  epochs: 2000
   horizon: 200
   # ---- Truncated BPTT (persistent carry across epochs) -------------------
   persistent_carry: true   # thread (state, obs, hidden, age) across epochs
@@ -71,8 +68,6 @@ training:
   batch_size: 64
   lr: 1.0e-3
   lr_min: 1.0e-5
-  morph_lr: 5.0e-3
-  morph_lr_min: 1.0e-3
   grad_clip: 1.0
   log_interval: 10
 
@@ -92,5 +87,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_morph_logs.csv
-  checkpoint_path: checkpoints/navigate_morph.pkl
+  csv_path: logs/navigate_fixed_columns_logs.csv
+  checkpoint_path: checkpoints/navigate_fixed_columns.pkl

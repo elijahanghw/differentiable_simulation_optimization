@@ -40,8 +40,8 @@ env:
 
   # ---- Scene (random obstacles) -----------------------------------------
   # Path to a scene YAML in scene/ — or replace with an inline dict.
-  # scene: scene/obstacles_dense.yaml
-  scene: scene/columns.yaml
+  # scene: ../scene/obstacles_dense.yaml
+  scene: ../scene/columns.yaml
 
 
 # -----------------------------------------------------------------------

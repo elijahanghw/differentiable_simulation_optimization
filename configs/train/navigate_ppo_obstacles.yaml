@@ -1,0 +1,161 @@
+# Recurrent PPO baseline — benchmark counterpart to navigate_morph_obstacles.yaml.
+#
+# The env, policy architecture and objective are identical to the TBPTT config,
+# so a run of each is a comparison of the *optimiser* (differentiable-sim
+# gradients vs. sampled policy gradients) at matched env-step cost per update:
+#   TBPTT : horizon 250 x batch 64  = 16,000 env steps / epoch
+#   PPO   : horizon 128 x batch 128 = 16,384 env steps / update
+#
+#   python train.py --config configs/navigate_ppo_obstacles.yaml
+
+# -----------------------------------------------------------------------
+# Environment  (identical to navigate_morph_obstacles.yaml, morphology frozen)
+# -----------------------------------------------------------------------
+env:
+  name: navigate
+  dt: 0.01                # physics/policy timestep (100 Hz loop)
+  integrator: semi_implicit_euler
+  train_morphology: false # PPO has no gradient through the dynamics
+  alternating_phi: false
+  phi_default: 0.0
+  grad_decay: 0.4
+
+  # ---- Loss weights (PPO reward = -per-step loss; see Navigate.step_reward) --
+  xy_weight:        1.0
+  z_weight:         2.0
+  vel_weight:       0.2
+  rate_weight:      0.1
+  collision_weight: 10.0
+  obj_weight:       8.0
+  heading_weight:   30.0
+  b1: 1.0
+  b2: 32.0
+
+  # ---- Drone initial state bounds ----------------------------------------
+  init_x_min: 0.0
+  init_x_max: 1.0
+  init_y_min: -1.0
+  init_y_max: 1.0
+  init_z_min: -1.4
+  init_z_max: -1.6
+
+  # ---- Target spawn bounds -----------------------------------------------
+  target_x_min: 9.0
+  target_x_max: 10.0
+  target_y_min: -1.0
+  target_y_max: 1.0
+  target_z_min: -1.5
+  target_z_max: -1.5
+
+  # ---- Scene (random obstacles) -----------------------------------------
+  scene: ../scene/obstacles.yaml
+
+# -----------------------------------------------------------------------
+# Policy  (same network BPTT trains — the actor)
+# -----------------------------------------------------------------------
+policy:
+  type: cnn_gru
+  squash_output: false
+  conv_features: [32, 64, 128]
+  kernel_sizes: [[2, 2], [3, 3], [3, 3]]
+  strides: [[2, 2], [1, 1], [1, 1]]
+  proj_dim: 192
+  leaky_slope: 0.05
+  hidden_size: 192
+
+# Critic: asymmetric and feed-forward. `type: mlp` makes it read the env's
+# privileged state (Navigate.critic_obs — true target-relative position plus the
+# signed obstacle distance) instead of the depth image. That state is fully
+# observed, so there is no history for a recurrent critic to infer, and the value
+# re-run collapses from a sequential 128-step scan (x update_epochs x
+# num_minibatches per update) into one batched forward.
+# For a recurrent critic instead, set type to cnn_gru and give it the conv keys.
+critic:
+  type: mlp
+  hidden_sizes: [256, 256]
+
+# -----------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------
+training:
+  algo: ppo
+  # 3052 x 128 x 512 = 200.0M env steps. Measured ~45k steps/s at batch 512
+  # (vs 17k at 128 — the GPU was badly underutilised), so ~1h15m; the
+  # feed-forward critic should take it under an hour.
+  epochs: 3000            # PPO updates
+  horizon: 250            # env steps collected per env per update
+  batch_size: 256         # parallel envs (must divide by num_minibatches)
+
+  # ---- PPO --------------------------------------------------------------
+  update_epochs:    10     # passes over each batch of collected data
+  # 8 rather than 4: at batch 512 the step count per update quadrupled, so 4
+  # minibatches would have cut total gradient steps to 49k against the 128-env
+  # config's 195k. 8 restores ~98k while keeping minibatches at 64 envs, and the
+  # diagnostics (approx_kl ~0.005, clip_frac ~0.05) show headroom for it.
+  num_minibatches:  4     # split along the env dim; time stays contiguous
+  # 0.995 gives a ~200-step (2 s) horizon, but flying 9 m at ~2 m/s takes ~450
+  # steps — the value function could not see the payoff of arriving at all.
+  # 0.999 gives ~1000 steps, matching max_episode_len.
+  gamma:            0.999
+  gae_lambda:       0.95
+  clip_eps:         0.2
+  vf_coef:          0.5
+  # ent_coef 0 + learn_std lets std decay to 0 (measured: 0.37 -> 0.026 over
+  # 2200 updates, after which the policy is deterministic and plateaus in the
+  # hover-at-spawn local optimum). Both of the next two lines oppose that.
+  ent_coef:         0.003
+  clip_value_loss:  true
+  init_log_std:    -1.0   # initial action std = 0.37
+  learn_std:        true
+  min_log_std:     -2.3   # floor the action std at 0.10 — keeps exploring
+  normalize_reward: true  # divide by running std of the discounted return
+  reward_clip:      10.0
+  smooth_action_loss: 0.0
+  # Potential-based progress shaping (see algos/ppo.py). Provably leaves the
+  # optimal policy unchanged, and mean_return is still logged unshaped, so the
+  # TBPTT comparison holds. This is the lever against the hover-at-spawn
+  # optimum: it rewards closing distance directly instead of relying on a huge
+  # distance^2 penalty getting marginally smaller.
+  progress_weight: 0.0
+
+  # ---- Episodes ---------------------------------------------------------
+  # false = TBPTT semantics: a crashed drone keeps flying (its collision penalty
+  # stays in the objective) and is re-seeded at the window boundary. This also
+  # avoids the terminal-bootstrap exploit that all-negative rewards create —
+  # see "Why reset_on_crash defaults to false" in algos/ppo.py before turning
+  # this on. Keeping it false is what makes mean_return directly comparable to
+  # the TBPTT run's.
+  reset_on_crash:   true
+  crash_bootstrap:  value # only used when reset_on_crash=true ("value"|"zero")
+  max_episode_len:  1000  # truncate after 10 s (bootstrapped); 0 = unbounded
+  reset_pool:       2     # pre-sampled fresh episodes per env per update
+                          # (with reset_on_crash=false at most ~2 are ever used)
+
+  # ---- Optimiser --------------------------------------------------------
+  lr:        3.0e-4
+  lr_min:    1.0e-5
+  anneal_lr: true         # schedule length derives from epochs automatically
+  grad_clip: 0.5
+  log_interval: 5         # ~610 CSV rows over the run
+
+  # Train on a morphology optimised by BPTT instead of the env default:
+  # morph_checkpoint: checkpoints/navigate_morph.pkl
+
+# -----------------------------------------------------------------------
+# Depth camera  (identical to the TBPTT config)
+# -----------------------------------------------------------------------
+depth_camera:
+  fov_deg: 80.0
+  width: 64
+  height: 48
+  min_range: 0.3
+  max_range: 3.0
+  quantization_m: 0.001
+  cam_hz: 10.0
+
+# -----------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------
+logging:
+  csv_path: logs/navigate_ppo_logs.csv
+  checkpoint_path: checkpoints/navigate_ppo.pkl
