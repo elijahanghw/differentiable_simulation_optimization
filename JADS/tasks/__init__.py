@@ -1,9 +1,11 @@
 from .hover import Hover
+from .hover_real import HoverReal
 from .navigate import Navigate
 
 
 ENV_REGISTRY = {
     "hover": Hover,
+    "hover_real": HoverReal,
     "navigate": Navigate,
 }
 

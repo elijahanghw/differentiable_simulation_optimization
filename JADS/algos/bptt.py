@@ -72,13 +72,20 @@ def _init_carry(env, policy, reset_fn, keys, has_hidden):
     and the shape stays self-documenting: state, obs, a per-element integer age
     (steps since that element last reset — used for the max_episode_len cap),
     and, for recurrent policies, the hidden state.
+
+    If env.reset returns "params" in its info (domain-randomized dynamics), they
+    ride in the carry too. That is what makes the randomization *per parallel
+    episode*: the batch axis of the carry is the vmap axis, so every element
+    holds its own parameter draw, and it stays fixed until that element resets.
     """
-    obs, states, _ = reset_fn(keys)
+    obs, states, info = reset_fn(keys)
     batch = keys.shape[0]
     carry = {"state": states, "obs": obs, "age": jnp.zeros(batch, dtype=jnp.int32)}
     if has_hidden:
         h0 = policy.init_hidden()
         carry["hidden"] = jnp.broadcast_to(h0, (batch,) + h0.shape)
+    if "params" in info:
+        carry["params"] = info["params"]
     return carry
 
 
@@ -119,6 +126,11 @@ def _build_loss_fn(env, policy, horizon: int):
         # and used only for the max_episode_len reset at the epoch boundary.
         def step(carry, step_idx):
             state, obs, age = carry["state"], carry["obs"], carry["age"]
+            # This element's dynamics parameters, constant for the episode. The
+            # dict key is static under trace, so this stays a Python branch.
+            env_kw = {"morph_matrices": morph_matrices}
+            if "params" in carry:
+                env_kw["params"] = carry["params"]
             if has_hidden:
                 hidden = carry["hidden"]
                 if has_depth:
@@ -126,22 +138,24 @@ def _build_loss_fn(env, policy, horizon: int):
                     action, new_hidden = policy.apply(
                         {"params": policy_params}, depth_img, obs_vec, hidden)
                     new_state, new_obs, step_data = env.step(
-                        state, action, morph_matrices=morph_matrices,
-                        step_idx=step_idx, prev_depth=depth_img,
+                        state, action, step_idx=step_idx, prev_depth=depth_img,
+                        **env_kw,
                     )
                 else:
                     action, new_hidden = policy.apply(
                         {"params": policy_params}, obs, hidden)
                     new_state, new_obs, step_data = env.step(
-                        state, action, morph_matrices=morph_matrices)
+                        state, action, **env_kw)
             else:
                 action = policy.apply({"params": policy_params}, obs)
                 new_state, new_obs, step_data = env.step(
-                    state, action, morph_matrices=morph_matrices)
+                    state, action, **env_kw)
 
             new_carry = {"state": new_state, "obs": new_obs, "age": age + 1}
             if has_hidden:
                 new_carry["hidden"] = new_hidden
+            if "params" in carry:
+                new_carry["params"] = carry["params"]
             return new_carry, step_data
 
         return jax.lax.scan(step, carry0, jnp.arange(horizon))
@@ -169,7 +183,8 @@ def _apply_epoch_resets(carry, crashed_any, max_episode_len, reset_fn, keys,
     Runs once per epoch on the *detached* carry, outside the differentiated
     rollout — so it costs a single batched env.reset (one depth render for depth
     envs), not one per step. A reset re-inits that element's state / obs / age
-    (and hidden) together; unaffected elements carry straight on.
+    (and hidden, and its domain-randomized params — a new episode means a new
+    airframe draw) together; unaffected elements carry straight on.
     """
     should_reset = jnp.zeros(carry["age"].shape, dtype=bool)
     if crashed_any is not None:
@@ -177,10 +192,12 @@ def _apply_epoch_resets(carry, crashed_any, max_episode_len, reset_fn, keys,
     if max_episode_len > 0:
         should_reset = should_reset | (carry["age"] >= max_episode_len)
 
-    r_obs, r_state, _ = reset_fn(keys)
+    r_obs, r_state, r_info = reset_fn(keys)
     reset_vals = {"state": r_state, "obs": r_obs, "age": jnp.zeros_like(carry["age"])}
     if has_hidden:
         reset_vals["hidden"] = jnp.broadcast_to(policy.init_hidden(), carry["hidden"].shape)
+    if "params" in carry:
+        reset_vals["params"] = r_info["params"]
 
     def sel(new, old):
         mask = should_reset.reshape((should_reset.shape[0],) + (1,) * (old.ndim - 1))
@@ -289,7 +306,9 @@ def train(config: Dict[str, Any]) -> Any:
     else:
         loss_fn = _build_loss_fn(env, policy, horizon)
         # No morphology to train: derived matrices are constant, computed once.
-        morph_matrices = env.compute_morphology()
+        # Envs with a fixed airframe (hover_real) have no morphology at all.
+        morph_matrices = (env.compute_morphology()
+                          if hasattr(env, "compute_morphology") else None)
         def _rollout_loss(policy_params, carry):
             return loss_fn(policy_params, morph_matrices, carry)
         grad_fn = jax.jit(jax.value_and_grad(_rollout_loss, has_aux=True))
