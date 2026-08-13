@@ -23,7 +23,12 @@ class Logger:
         if print_line:
             parts = [f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}"
                      for k, v in data.items()]
-            print("  ".join(parts))
+            # flush: stdout is block-buffered whenever it is not a terminal
+            # (piped to tee, redirected to a file, run under nohup), which
+            # otherwise hides every training line until the buffer fills or the
+            # process exits — while the CSV updates normally, since it is
+            # reopened per row.
+            print("  ".join(parts), flush=True)
 
         with open(self._csv_path, "a", newline="") as f:
             csv.DictWriter(f, fieldnames=self._fields).writerow(data)
