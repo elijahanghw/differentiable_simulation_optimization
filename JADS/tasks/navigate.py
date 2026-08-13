@@ -42,6 +42,7 @@ class Navigate:
 
     # ---- Drone --------------------------------------------------------
     obs_dim: int = 18
+    critic_obs_dim: int = 22   # privileged critic input — see critic_obs()
     act_dim: int = 6
     dt: float = 0.02 # 1.0/15.0
 
@@ -504,6 +505,112 @@ class Navigate:
         return total, -total
 
 
+
+    # -----------------------------------------------------------------------
+    # Per-step reward (RL algorithms — see algos/ppo.py)
+    # -----------------------------------------------------------------------
+
+    def initial_dist(self, state: jnp.ndarray, morph_matrices: tuple = None) -> jnp.ndarray:
+        """Signed obstacle distance for `state`, mirroring what step() reports.
+
+        Used to seed `prev_dist` for step_reward() right after reset(), where no
+        previous step exists. Pass `morph_matrices` to include the six motor
+        spheres exactly as step() does; without it only the body centre is used.
+        """
+        motor_pos_world = None
+        if morph_matrices is not None:
+            motor_pos_body = morph_matrices[5]
+            R_sg = jax.lax.stop_gradient(quat_to_rotmat(state[6:10]))
+            motor_pos_world = state[0:3] + motor_pos_body @ R_sg.T
+        return self._get_nearest_obstacle_dist(state, motor_pos_world)
+
+    def dist_to_target(self, state: jnp.ndarray) -> jnp.ndarray:
+        """Euclidean distance from the drone to the target.
+
+        Doubles as the potential for progress shaping in PPO (algos/ppo.py,
+        `progress_weight`) and as a training diagnostic.
+        """
+        return jnp.linalg.norm(state[0:3] - state[19:22])
+
+    def critic_obs(self, state: jnp.ndarray, dist: jnp.ndarray) -> jnp.ndarray:
+        """Privileged observation for an asymmetric (feed-forward) critic.
+
+        The critic is discarded at deployment, so it may read state the actor
+        never sees. Handing it the true target-relative position and the signed
+        obstacle distance makes the value problem essentially fully observed,
+        which is what removes the need for a recurrent critic: there is no
+        history left to infer. `dist` is not recomputed here — pass the value
+        step() already produced (or initial_dist() right after reset).
+
+        Layout (critic_obs_dim = 22):
+            [0:3]   absolute position   (altitude matters — ground plane at z=0)
+            [3:6]   target-relative position
+            [6:9]   velocity
+            [9:12]  attitude (euler)
+            [12:15] body rates
+            [15:21] motor speeds
+            [21]    signed distance to the nearest obstacle  (privileged)
+        """
+        return jnp.concatenate([
+            state[0:3],
+            state[0:3] - state[19:22],
+            state[3:6],
+            quat_to_euler(state[6:10]),
+            state[10:13],
+            state[13:19],
+            jnp.atleast_1d(dist),
+        ])
+
+    def step_reward(self, step_data: dict, prev_dist: jnp.ndarray) -> jnp.ndarray:
+        """Reward for one step: the negated per-step summand of compute_loss.
+
+        compute_loss() is a weighted mean over (batch, horizon) of per-step
+        penalties, so maximising sum_t step_reward is — up to the discount and
+        the 1/T factor — the same objective BPTT minimises. Keeping the two in
+        exact correspondence is what makes a PPO-vs-(T)BPTT benchmark on this
+        task a comparison of *optimisers* rather than of objectives.
+
+        Args:
+            step_data: one unbatched step dict from step().
+            prev_dist: `dist` from the previous step. The collision terms are
+                weighted by the approach speed -(dist_t - dist_{t-1})/dt, so the
+                caller must thread it across steps (seed it with initial_dist()).
+
+        Returns:
+            scalar reward (negative — this is a cost-shaped task).
+        """
+        pos    = step_data["pos"]
+        vel    = step_data["vel"]
+        quat   = step_data["quat"]
+        omega  = step_data["omega"]
+        target = step_data["target_pos"]
+        dist   = step_data["dist"]
+
+        diff = pos - target
+        loss_xy   = jnp.sum(diff[:2] ** 2)
+        loss_z    = diff[2] ** 2
+        loss_vel  = jnp.sum(vel ** 2)
+        loss_rate = jnp.sum(omega ** 2)
+
+        w, x, y, z = quat[0], quat[1], quat[2], quat[3]
+        fwd = jnp.stack([
+            1.0 - 2.0 * (y**2 + z**2),
+            2.0 * (x*y + z*w),
+            2.0 * (x*z - y*w),
+        ])
+        to_target = target - pos
+        to_target = to_target / jnp.sqrt(jnp.maximum(jnp.sum(to_target ** 2), 1e-8))
+        loss_heading = (1.0 - jnp.sum(fwd * to_target)) ** 2
+
+        v_to_pt = jnp.clip(-(dist - prev_dist) / self.dt, 1.0, None)
+        loss_collision = self.b1 * jax.nn.softplus(self.b2 * (-dist)) * v_to_pt
+        loss_obj       = jax.nn.relu(1.0 - dist) ** 2 * v_to_pt
+
+        total = (self.xy_weight*loss_xy + self.z_weight*loss_z
+                 + self.vel_weight*loss_vel + self.rate_weight*loss_rate
+                 + self.collision_weight*loss_collision + self.obj_weight*loss_obj
+                 + self.heading_weight*loss_heading)
+        return -total
 
     # -----------------------------------------------------------------------
     # Morphology
