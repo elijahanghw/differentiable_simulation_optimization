@@ -1,40 +1,30 @@
 """
 (Truncated) Backpropagation Through Time — (T)BPTT.
 
-Backpropagates gradients through differentiable simulation dynamics using
-jax.value_and_grad.  Supports joint morphology optimisation when the
-environment exposes init_morph().
+Backpropagates through differentiable simulation dynamics with
+jax.value_and_grad. Jointly optimises morphology when the env exposes
+init_morph().
 
-Two rollout regimes (selected by training.persistent_carry)
------------------------------------------------------------
-* Fresh-batch BPTT (default, persistent_carry=false)
-    Every epoch samples a fresh batch via env.reset() and rolls it out for
-    ``horizon`` steps from a zero hidden state — the classic BPTT window.
+Two rollout regimes (training.persistent_carry)
+-----------------------------------------------
+* Fresh-batch BPTT (default) — each epoch samples a new batch via env.reset()
+  and rolls it out for ``horizon`` steps from a zero hidden state.
 
-* Persistent-carry / truncated BPTT (persistent_carry=true)
-    A single (state, obs, hidden, age) carry is threaded across *all* epochs.
-    Each epoch rolls the carry forward ``horizon`` steps, backprops through that
-    one window, then ``stop_gradient``s the final carry and feeds it back as the
-    next epoch's start. Gradients are truncated to a single window, but the
-    state / hidden distribution seen in training is the on-policy, arbitrarily-
-    aged one — not just steps 0..horizon from a zero hidden state — so the
-    policy stays in-distribution far past ``horizon`` at eval.
+* Persistent-carry / TBPTT — one (state, obs, hidden, age) carry is threaded
+  across all epochs: roll forward ``horizon`` steps, backprop through that
+  window, stop_gradient the final carry, feed it back. Gradients are truncated
+  to a single window, but training then sees the on-policy, arbitrarily-aged
+  state distribution rather than only steps 0..horizon from a zero hidden
+  state, so the policy stays in-distribution far past ``horizon`` at eval.
 
-    Resets happen per element at the *epoch boundary* (the truncation boundary),
-    never inside the scan — so we pay one batched env.reset (one depth render for
-    depth envs) per epoch, not one per step:
-      - reset_on_crash (default true): an element that reports
-        ``step_data["crashed"]`` anywhere in the window is re-seeded for the next
-        epoch. It keeps flying to the end of the current window; its collision
-        loss still supplies the away-from-obstacle gradient.
-      - max_episode_len (default 0 = unbounded): an element whose carried age has
-        reached this many steps is force-reset, keeping the fresh-reset state
-        diversity from env.reset present in training as the policy improves. Age
-        is tracked in the carry (the flat-array states carry no time field of
-        their own); the cap is thus checked at horizon granularity.
-    A reset re-inits that element's state / obs / hidden / age together for the
-    next epoch; the carry is stop_gradient'd at every epoch boundary regardless,
-    so no gradient ever crosses a reset.
+  Elements reset at the *epoch boundary* (== the truncation boundary), never
+  inside the scan, so resets cost one batched env.reset per epoch:
+    - reset_on_crash (default true): re-seed any element whose step_data
+      reported "crashed" during the window. It still flies to the end of that
+      window, where its collision loss supplies the away-from-obstacle gradient.
+    - max_episode_len (default 0 = unbounded): force-reset an element at this
+      age, preserving env.reset state diversity as the policy improves. Age
+      lives in the carry, so the cap is checked at horizon granularity.
 
 Environment contract
 --------------------
@@ -42,7 +32,8 @@ Environment contract
   env.step(state, action, morph_matrices) → (next_state, next_obs, step_data)
   env.compute_morphology([morph_params])  → morph_matrices
   env.compute_loss(traj)                  → (total_loss, mean_return)
-  step_data may include a bool "crashed"  → enables reset_on_crash.
+  info may include "params"               → per-episode domain randomization
+  step_data may include a bool "crashed"  → enables reset_on_crash
 """
 
 import math
@@ -68,15 +59,12 @@ from JADS.utils.checkpoint import save as save_checkpoint
 def _init_carry(env, policy, reset_fn, keys, has_hidden):
     """Build a fresh batched rollout carry from a batch of reset keys.
 
-    The carry is a dict so the epoch-boundary reset (below) is a single tree_map
-    and the shape stays self-documenting: state, obs, a per-element integer age
-    (steps since that element last reset — used for the max_episode_len cap),
-    and, for recurrent policies, the hidden state.
+    A dict, so the epoch-boundary reset is one tree_map. ``age`` counts steps
+    since that element last reset, for the max_episode_len cap.
 
-    If env.reset returns "params" in its info (domain-randomized dynamics), they
-    ride in the carry too. That is what makes the randomization *per parallel
-    episode*: the batch axis of the carry is the vmap axis, so every element
-    holds its own parameter draw, and it stays fixed until that element resets.
+    If env.reset returns "params" in its info, they ride in the carry too — that
+    is what makes randomization *per parallel episode*: the carry's batch axis is
+    the vmap axis, so each element holds its own draw until it resets.
     """
     obs, states, info = reset_fn(keys)
     batch = keys.shape[0]
@@ -97,33 +85,25 @@ def _build_loss_fn(env, policy, horizon: int):
     """Build ``loss_fn(policy_params, morph_matrices, carry)``.
 
     One scan-based rollout covers every combination of {morph, no-morph} ×
-    {recurrent, feed-forward} × {depth, plain}. ``morph_matrices`` is supplied
-    by the caller (a constant for no-morph; derived from morph_params inside the
-    differentiated wrapper for morph), so this builder is morphology-agnostic.
+    {recurrent, feed-forward} × {depth, plain}. ``morph_matrices`` comes from
+    the caller — a constant for no-morph, derived from morph_params inside the
+    differentiated wrapper for morph — so this builder is morphology-agnostic.
 
-    The rollout threads a persistent carry and returns the final carry, so the
-    training loop can either discard it (fresh-batch BPTT) or feed it back
-    detached (persistent-carry / truncated BPTT). Resets are **not** done inside
-    the scan — a crashing/aged element keeps flying to the end of the window
-    (its collision loss still supplies the gradient), and the loop resets it at
-    the epoch boundary (_apply_epoch_resets), which is the truncation boundary
-    anyway. This avoids an env.reset — and, for depth envs, a full depth render —
-    on every single step. To that end, if ``step_data`` carries a "crashed"
-    flag, the loss exposes a per-element ``crashed_any`` (did this element crash
-    anywhere in the window) alongside the final ``age`` in the carry.
+    Returns the final carry, which the loop either discards (fresh-batch) or
+    feeds back detached (TBPTT). Resets are not done in-scan; see the module
+    docstring. To support that, a "crashed" flag in ``step_data`` is reduced
+    over the window into a per-element ``crashed_any``.
     """
     has_hidden = hasattr(policy, "init_hidden")
     has_depth  = hasattr(policy, "conv_features")
 
     def single_rollout(policy_params, morph_matrices, carry0):
-        # step_idx is the scan index (jnp.arange below): the SAME scalar for
-        # every batch element at a given step. It drives the depth-render
-        # zero-order-hold cadence, and being uniform across the vmap batch it
-        # keeps env's `should_render` cond a real conditional — depth renders
-        # once per frame_skip steps. (Threading the per-element `age` here
+        # step_idx is the scan index: the SAME scalar for every batch element,
+        # which keeps env's `should_render` cond a real conditional so depth
+        # renders once per frame_skip. Threading the per-element `age` here
         # instead would make the predicate batched, so vmap lowers cond→select
-        # and renders every step — ~frame_skip× the work.) `age` is per-element
-        # and used only for the max_episode_len reset at the epoch boundary.
+        # and renders every step (~frame_skip× the work). `age` is per-element
+        # and only used for the max_episode_len reset at the epoch boundary.
         def step(carry, step_idx):
             state, obs, age = carry["state"], carry["obs"], carry["age"]
             # This element's dynamics parameters, constant for the episode. The
@@ -181,10 +161,9 @@ def _apply_epoch_resets(carry, crashed_any, max_episode_len, reset_fn, keys,
     """Re-seed elements that crashed in the window or hit the age cap.
 
     Runs once per epoch on the *detached* carry, outside the differentiated
-    rollout — so it costs a single batched env.reset (one depth render for depth
-    envs), not one per step. A reset re-inits that element's state / obs / age
-    (and hidden, and its domain-randomized params — a new episode means a new
-    airframe draw) together; unaffected elements carry straight on.
+    rollout: one batched env.reset (one depth render), not one per step. A reset
+    re-inits state / obs / age / hidden and re-draws that element's randomized
+    params together — a new episode means a new airframe. Others carry straight on.
     """
     should_reset = jnp.zeros(carry["age"].shape, dtype=bool)
     if crashed_any is not None:
