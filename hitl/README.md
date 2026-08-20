@@ -70,10 +70,17 @@ is what gives it the 48×64 image; without it the viewer falls back to displayin
 | `world/{ground,spheres,boxes,capsules,branches}` | the baked obstacle field, logged once |
 | `drone/{body,arms,motors,axes}` | the airframe, static in the body frame |
 | `drone/camera` | pinhole frustum, `focal = (W/2)/tan(fov/2)`, FRD |
-| `drone/camera/depth` | the rendered depth image, in the frustum |
+| `drone/camera/depth` | the rendered depth image in metres, back-projected into the frustum |
+| `view/proximity` | the same frame inverted — **close is bright**, empty space is dark |
 | `cnn_input` | the 12×16 tensor as it reaches the policy |
 | `world/trajectory` | flown path |
 | `health/*` | rate, render cost, pose age, stale flag, nearest obstacle |
+
+Every rerun colormap runs dark→bright with increasing value, so a metric depth image
+paints the far plane — typically two thirds of a frame — in the loudest colour. That is
+why `drone/camera/depth` stays metric (rerun needs true metres to back-project it into
+the frustum) but is drawn in `grayscale` by default, while `view/proximity` carries the
+inverted copy where obstacles are the bright thing. `--colormap` changes the former.
 
 `--save session.rrd` records instead of spawning a window (add `--spawn` for both),
 `--connect` attaches to a viewer that is already open, and `--duration N` stops cleanly

@@ -183,13 +183,28 @@ def log_drone_pose(pos: np.ndarray, quat: np.ndarray) -> None:
     ))
 
 
-def to_metres(frame) -> np.ndarray:
-    """Both payload types → a metric depth image rerun can render."""
+def to_metres(frame, cam: dict) -> np.ndarray:
+    """Both payload types → a metric depth image, for the frustum projection."""
     if frame.payload_type == PAYLOAD_RAW_U16_MM:
         return np.asarray(frame.data, np.float32) / 1000.0
     # Invert the training normalization: v = num/clip(d) - off  →  d = num/(v + off).
     v = np.asarray(frame.data, np.float32)
-    return 3.0 / np.maximum(v + 0.6, 1e-3)
+    return cam["norm_numerator"] / np.maximum(v + cam["norm_offset"], 1e-3)
+
+
+def to_proximity(depth_m: np.ndarray, cam: dict) -> np.ndarray:
+    """
+    Depth in metres → 0..1 where *bright means close*.
+
+    Rerun's colormaps all run dark→bright with increasing value, so handing them
+    raw depth paints the far plane — most of a typical frame — in the loudest
+    colour. Obstacles are the signal here, so invert it: a pixel that hit nothing
+    sits at max_range and becomes 0, and the blind zone (0 m, closer than
+    min_range) is pinned to 1 rather than reading as infinitely far away.
+    """
+    d = np.asarray(depth_m, np.float32)
+    prox = 1.0 - np.clip(d / cam["max_range"], 0.0, 1.0)
+    return np.where(d <= 0.0, 1.0, prox).astype(np.float32)
 
 
 def main() -> int:
@@ -211,11 +226,21 @@ def main() -> int:
                     help="force spawning a viewer even when --save is given")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="stop after this many seconds [run until Ctrl-C]")
+    ap.add_argument("--colormap", default="grayscale",
+                    choices=["grayscale", "viridis", "inferno", "magma", "plasma", "turbo"],
+                    help="colormap for the metric depth image in the frustum "
+                         "[grayscale]; note these all run dark→bright with distance, "
+                         "so see the view/proximity image for a close-is-bright view")
     args = ap.parse_args()
 
     with open(args.scene) as f:
         doc = json.load(f)
     cam = doc["camera"]
+
+    # The pooled tensor's brightest possible value: a pixel inside the blind zone,
+    # which clamps to norm_clip_min. Scaling by it keeps the view stable frame to
+    # frame instead of auto-ranging on whatever happens to be closest.
+    cnn_full_scale = cam["norm_numerator"] / cam["norm_clip_min"] - cam["norm_offset"]
 
     motor_pos_body, body_radius = None, 0.05
     try:
@@ -294,15 +319,19 @@ def main() -> int:
 
                 # The full-resolution frame wins the frustum; the pooled tensor is
                 # what the CNN actually eats, so show it in its own view.
-                depth_m = to_metres(frame)
+                depth_m = to_metres(frame, cam)
                 if is_raw or not have_raw:
+                    # Metric, so rerun back-projects it into the frustum as points.
                     rr.log("drone/camera/depth", rr.DepthImage(
-                        depth_m, meter=1.0, colormap="viridis",
+                        depth_m, meter=1.0, colormap=args.colormap,
                         depth_range=(0.0, float(cam["max_range"]))))
+                    # Same frame, inverted for legibility: close is bright.
+                    rr.log("view/proximity", rr.Image(to_proximity(depth_m, cam)))
                 if frame.payload_type == PAYLOAD_POOLED_F32:
-                    rr.log("cnn_input", rr.DepthImage(
-                        depth_m, meter=1.0, colormap="viridis",
-                        depth_range=(0.0, float(cam["max_range"]))))
+                    # The tensor exactly as the policy receives it — already
+                    # "bright is close", since v = 3/clip(d) - 0.6.
+                    rr.log("cnn_input", rr.Image(
+                        np.asarray(frame.data, np.float32) / cnn_full_scale))
 
                 # Pose only needs logging once per timestamp; the pooled frame and
                 # the raw frame of a given seq carry the same one.

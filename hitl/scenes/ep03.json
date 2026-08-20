@@ -17,6 +17,7 @@
   "min_range": 0.3,
   "max_range": 3.0,
   "quantization_m": 0.001,
+  "cam_hz": 10.0,
   "pool": 4,
   "norm_numerator": 3.0,
   "norm_clip_min": 0.3,

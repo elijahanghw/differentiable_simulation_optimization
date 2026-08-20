@@ -96,6 +96,7 @@ void load_scene(const std::string& path, Scene& scene, CamCfg& cam) {
         cam.min_range      = static_cast<float>(c.number_or("min_range",      cam.min_range));
         cam.max_range      = static_cast<float>(c.number_or("max_range",      cam.max_range));
         cam.quantization_m = static_cast<float>(c.number_or("quantization_m", cam.quantization_m));
+        cam.cam_hz         = static_cast<float>(c.number_or("cam_hz",         cam.cam_hz));
         cam.pool           = static_cast<int>  (c.number_or("pool",           cam.pool));
         cam.norm_numerator = static_cast<float>(c.number_or("norm_numerator", cam.norm_numerator));
         cam.norm_clip_min  = static_cast<float>(c.number_or("norm_clip_min",  cam.norm_clip_min));

@@ -50,7 +50,7 @@ struct Options {
     bool        raw_out   = false;
     uint16_t    raw_port  = 5011;
 
-    double      rate_hz   = 10.0;
+    double      rate_hz   = 0.0;       // 0 = take cam_hz from the scene file
     bool        realtime  = false;
     bool        preview   = true;
     bool        print_pooled = false;
@@ -93,7 +93,7 @@ void usage() {
 "  --raw-port N                                          [5011]\n"
 "\n"
 "Timing\n"
-"  --rate HZ            render rate                      [10]\n"
+"  --rate HZ            render rate    [the scene file's camera cam_hz]\n"
 "  --rt                 SCHED_FIFO + mlockall (needs privileges)\n"
 "\n"
 "Camera mount (rigid-body frame → camera; defaults match the simulator)\n"
@@ -184,6 +184,8 @@ void apply_overrides(const Options& o, CamCfg& cam) {
         die("camera width and height must be divisible by pool (VALID max-pool, as in training)");
     if (!(cam.max_range > cam.min_range))
         die("max_range must exceed min_range");
+    if (!(cam.cam_hz > 0.0f))
+        die("camera cam_hz must be positive");
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +364,15 @@ int main(int argc, char** argv) {
         die(e.what());
     }
     apply_overrides(o, cam);
+
+    // The render rate defaults to the camera rate the policy trained with, which
+    // export_scene.py copies out of the training config's depth_camera.cam_hz.
+    const bool rate_from_scene = (o.rate_hz <= 0.0);
+    if (rate_from_scene) o.rate_hz = cam.cam_hz;
+
     describe(scene, cam, o);
+    std::printf("rate    %.2f Hz%s\n", o.rate_hz,
+                rate_from_scene ? "  (from the scene file's cam_hz)" : "  (--rate)");
 
     if (!o.one_pose.empty() || !o.poses_file.empty()) return run_offline(o, scene, cam);
 
@@ -380,7 +390,7 @@ int main(int argc, char** argv) {
     std::printf("depth out udp %s:%u  (%d floats/frame)%s\n",
                 o.out_host.c_str(), o.out_port, cam.pooled(),
                 o.raw_out ? "  + raw frames" : "");
-    std::printf("rate     %.2f Hz\n\n", o.rate_hz);
+    std::printf("\n");
 
     if (o.realtime) enable_realtime();
 
@@ -489,6 +499,14 @@ int main(int argc, char** argv) {
                 o.scene_path  = path;
                 buf.resize(cam);
                 message = "loaded " + path;
+                // The loop period is fixed at startup; say so rather than
+                // quietly rendering at a rate this scene did not ask for.
+                if (std::fabs(cam.cam_hz - o.rate_hz) > 1e-3)
+                    message += "  [WARNING: its cam_hz is "
+                             + std::to_string(cam.cam_hz).substr(0, 5)
+                             + " Hz, still rendering at "
+                             + std::to_string(o.rate_hz).substr(0, 5)
+                             + " Hz — restart to change]";
             } catch (const std::exception& e) {
                 message = std::string("scene load failed: ") + e.what();
             }

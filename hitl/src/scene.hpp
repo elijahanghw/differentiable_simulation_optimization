@@ -20,6 +20,7 @@ struct CamCfg {
     float min_range      = 0.3f;    // closer than this → 0 (blind zone)
     float max_range      = 3.0f;    // farther / no hit → max_range
     float quantization_m = 0.001f;  // depth step (1 mm)
+    float cam_hz         = 10.0f;   // rate the policy was trained to expect
     int   pool           = 4;       // max-pool factor → CNN input
 
     // Normalization applied before pooling, hardcoded in NavigateReal

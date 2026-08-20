@@ -162,6 +162,7 @@ def camera_block(depth_camera: dict, pool: int) -> dict:
         "min_range":      float(depth_camera.get("min_range", 0.2)),
         "max_range":      float(depth_camera.get("max_range", 8.0)),
         "quantization_m": float(depth_camera.get("quantization_m", 0.001)),
+        "cam_hz":         float(depth_camera.get("cam_hz", 10.0)),
         "pool":           int(pool),
         "norm_numerator": 3.0,
         "norm_clip_min":  0.3,
