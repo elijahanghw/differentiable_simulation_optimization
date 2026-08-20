@@ -28,9 +28,16 @@ _gdecay.defvjp(_gdecay_fwd, _gdecay_bwd)
 # saturated action (U = -1 ⇒ u = 0) poisons the whole BPTT backward pass with
 # NaN. Clamping the sqrt *argument* would bias the forward motor speed, so
 # instead the value stays exact and only the derivative is capped, at
-# 1/(2·√_SQRT_EPS). _SQRT_EPS = 1e-4 corresponds to u ≈ 5e-4 (0.05% throttle),
-# capping dW_c/du near zero at ~10x its value at hover trim.
-_SQRT_EPS = 1e-4
+# 1/(2·√_SQRT_EPS). This is purely a gradient knob — the simulated trajectory is
+# identical for any value.
+#
+# 1e-2 caps the slope at 5, which only binds below u ≈ 4.3% throttle; hover trim
+# sits at u ≈ 30%, so the operating range is untouched. Peak dW_c/du then lands
+# at 1.4x its hover-trim value instead of the 10.7x that _SQRT_EPS = 1e-4 gave,
+# which is what keeps the k_rd·d_W yaw feedthrough (a direct action → angular
+# acceleration path, with no counterpart in the morphology model) from
+# overflowing float32 across a long BPTT window.
+_SQRT_EPS = 1e-2
 
 @jax.custom_jvp
 def _safe_sqrt(x):

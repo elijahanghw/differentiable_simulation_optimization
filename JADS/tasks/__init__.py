@@ -1,12 +1,14 @@
 from .hover import Hover
 from .hover_real import HoverReal
 from .navigate import Navigate
+from .navigate_real import NavigateReal
 
 
 ENV_REGISTRY = {
     "hover": Hover,
     "hover_real": HoverReal,
     "navigate": Navigate,
+    "navigate_real": NavigateReal,
 }
 
 
