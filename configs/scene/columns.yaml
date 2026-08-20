@@ -21,7 +21,7 @@ arena_z_min: -1.0
 arena_z_max: 0.0
 
 n_spheres:  0
-n_boxes:    20
+n_boxes:    18
 n_capsules: 0
 
 box_hx_min: 0.05
