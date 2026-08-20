@@ -1,0 +1,4 @@
+depth_hitl
+src/*.o
+*.pgm
+tools/__pycache__/
