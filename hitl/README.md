@@ -48,6 +48,38 @@ python hitl/tools/fake_mocap.py --traj orbit --cx 5 --radius 3.5 --speed 1.5
 Hotkeys while running: `q` quit · `r` reload the current scene · `n` next scene in
 `--scene-dir` · `p` toggle preview · `s` save the raw frame as a 16-bit PGM.
 
+## Live 3D view
+
+[tools/live_view.py](tools/live_view.py) opens a rerun window showing the obstacle
+field, the drone's live pose and body axes, the camera frustum with the depth image
+projected into it, the flown trajectory, and timing scalars.
+
+```sh
+./hitl/depth_hitl --scene hitl/scenes/ep00.json --raw-out --no-preview   # terminal 2
+python hitl/tools/live_view.py --scene hitl/scenes/ep00.json             # terminal 3
+```
+
+It subscribes to the depth stream rather than to the mocap, so the pose it draws is
+byte-for-byte the pose each frame was rendered from — the map and the image cannot
+drift apart, and the viewer adds no load to the 10 Hz loop. `--raw-out` on the renderer
+is what gives it the 48×64 image; without it the viewer falls back to displaying the
+12×16 tensor.
+
+| entity | what it is |
+|---|---|
+| `world/{ground,spheres,boxes,capsules,branches}` | the baked obstacle field, logged once |
+| `drone/{body,arms,motors,axes}` | the airframe, static in the body frame |
+| `drone/camera` | pinhole frustum, `focal = (W/2)/tan(fov/2)`, FRD |
+| `drone/camera/depth` | the rendered depth image, in the frustum |
+| `cnn_input` | the 12×16 tensor as it reaches the policy |
+| `world/trajectory` | flown path |
+| `health/*` | rate, render cost, pose age, stale flag, nearest obstacle |
+
+`--save session.rrd` records instead of spawning a window (add `--spawn` for both),
+`--connect` attaches to a viewer that is already open, and `--duration N` stops cleanly
+after N seconds. The obstacle field is logged once at startup, so after changing episode
+with the `n` hotkey, restart the viewer with the matching `--scene`.
+
 ## Pose input
 
 The datagram is the one [relay.cpp](../tmp/relay.cpp) consumes — `uint32` streaming id,
@@ -201,3 +233,4 @@ python hitl/tools/recv_depth.py --port 5010 --count 100 --save live.npz
 | [tools/compare_with_jax.py](tools/compare_with_jax.py) | parity check against the simulator |
 | [tools/fake_mocap.py](tools/fake_mocap.py) | scripted pose source for bench testing |
 | [tools/recv_depth.py](tools/recv_depth.py) | frame decoder / reference consumer |
+| [tools/live_view.py](tools/live_view.py) | live rerun map, pose, frustum and depth image |
