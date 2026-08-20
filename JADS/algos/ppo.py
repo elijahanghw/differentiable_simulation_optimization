@@ -73,9 +73,10 @@ Environment contract (superset of the BPTT one)
 -----------------------------------------------
   env.reset(key)                          → (obs, state, info)
   env.step(state, action, morph_matrices) → (next_state, next_obs, step_data)
-  env.compute_morphology([morph_params])  → morph_matrices
+  env.compute_morphology([morph_params])  → morph_matrices      (morphology envs)
   env.step_reward(step_data, prev_dist)   → scalar reward       (PPO only)
   env.initial_dist(state, morph_matrices) → prev_dist seed      (PPO only)
+  info may include "params"               → per-episode domain randomization
   step_data may include a bool "crashed"  → enables reset_on_crash.
 
 Morphology is *not* optimised here — the morphology gradient in BPTT comes from
@@ -251,7 +252,9 @@ def train(config: Dict[str, Any]) -> Any:
               "morphology (no gradient through the simulator). Falling back to "
               "the env's default airframe; set training.morph_checkpoint to a "
               "BPTT checkpoint to benchmark on an optimised one.")
-    morph_matrices = env.compute_morphology(morph_params)
+    # A *_real env has a fixed identified airframe and no morphology at all.
+    morph_matrices = (env.compute_morphology(morph_params)
+                      if hasattr(env, "compute_morphology") else None)
 
     # -- Actor / critic -----------------------------------------------------
     # Actor is built from the same `policy:` block BPTT uses, so the compared
@@ -367,15 +370,28 @@ def train(config: Dict[str, Any]) -> Any:
 
     # -- Vmapped env --------------------------------------------------------
     reset_fn = jax.vmap(env.reset)
+
+    # Per-episode domain randomization: a *_real env returns that episode's
+    # airframe in reset()'s info, and it has to ride in the carry so each
+    # parallel episode keeps its own draw until it resets — exactly what
+    # bptt.py's carry does. Probed once here with a throwaway reset.
+    has_env_params = "params" in env.reset(jax.random.PRNGKey(0))[2]
+    p_axis = 0 if has_env_params else None   # None keeps the signature uniform
+
+    def _params_kw(p):
+        return {"params": p} if has_env_params else {}
+
     if has_depth:
         step_fn = jax.vmap(
-            lambda s, a, si, pd: env.step(s, a, morph_matrices=morph_matrices,
-                                          step_idx=si, prev_depth=pd),
-            in_axes=(0, 0, None, 0))
+            lambda s, a, p, si, pd: env.step(s, a, morph_matrices=morph_matrices,
+                                             step_idx=si, prev_depth=pd,
+                                             **_params_kw(p)),
+            in_axes=(0, 0, p_axis, None, 0))
     else:
         step_fn = jax.vmap(
-            lambda s, a: env.step(s, a, morph_matrices=morph_matrices),
-            in_axes=(0, 0))
+            lambda s, a, p: env.step(s, a, morph_matrices=morph_matrices,
+                                     **_params_kw(p)),
+            in_axes=(0, 0, p_axis))
     reward_fn = jax.vmap(env.step_reward)
     dist_fn   = jax.vmap(lambda s: env.initial_dist(s, morph_matrices))
     cobs_fn   = jax.vmap(env.critic_obs) if critic_privileged else None
@@ -399,13 +415,16 @@ def train(config: Dict[str, Any]) -> Any:
 
     def _fresh(keys):
         """Sample a batch of fresh episodes: obs, state and the prev_dist seed."""
-        obs, states, _ = reset_fn(keys)
-        return {"state": states, "obs": obs, "dist": dist_fn(states),
-                "d_target": dtgt_fn(states)}
+        obs, states, info = reset_fn(keys)
+        fresh = {"state": states, "obs": obs, "dist": dist_fn(states),
+                 "d_target": dtgt_fn(states)}
+        if has_env_params:
+            fresh["params"] = info["params"]
+        return fresh
 
     def _init_carry(keys):
         fresh = _fresh(keys)
-        return {
+        carry = {
             "state":     fresh["state"],
             "obs":       fresh["obs"],
             "prev_dist": fresh["dist"],
@@ -416,6 +435,9 @@ def train(config: Dict[str, Any]) -> Any:
             "last_done": jnp.zeros(batch_size, dtype=bool),
             "slot":      jnp.zeros(batch_size, dtype=jnp.int32),
         }
+        if has_env_params:
+            carry["params"] = fresh["params"]
+        return carry
 
     # -- Rollout ------------------------------------------------------------
     def _rollout(params, carry, pool, key):
@@ -432,11 +454,15 @@ def train(config: Dict[str, Any]) -> Any:
             action = mean + jnp.exp(log_std) * jax.random.normal(sub, mean.shape)
             log_prob = _log_prob(action, mean, log_std)
 
+            # This element's airframe, constant for the episode (None when the
+            # env has no per-episode params — then step_fn ignores it).
+            ep_params = carry.get("params")
             if has_depth:
                 depth, _ = obs
-                new_state, new_obs, sd = step_fn(carry["state"], action, step_idx, depth)
+                new_state, new_obs, sd = step_fn(carry["state"], action, ep_params,
+                                                 step_idx, depth)
             else:
-                new_state, new_obs, sd = step_fn(carry["state"], action)
+                new_state, new_obs, sd = step_fn(carry["state"], action, ep_params)
             reward = reward_fn(sd, carry["prev_dist"]) * reward_scale
 
             # Diagnostics + shaping potential. d_target is what distinguishes
@@ -471,6 +497,9 @@ def train(config: Dict[str, Any]) -> Any:
                 "slot":      jnp.minimum(carry["slot"] + done, n_slots - 1),
                 "rng":       rng,
             }
+            if has_env_params:
+                # A new episode means a new airframe, drawn with the pooled reset.
+                new_carry["params"] = _where_batch(done, picked["params"], carry["params"])
             transition = {
                 "obs":        obs,
                 "action":     action,
@@ -658,6 +687,9 @@ def train(config: Dict[str, Any]) -> Any:
                 last_done = carry["last_done"] | crashed_any,
                 slot      = jnp.minimum(carry["slot"] + crashed_any, n_slots - 1),
             )
+            if has_env_params:
+                carry["params"] = _where_batch(
+                    crashed_any, picked["params"], carry["params"])
 
         # raw_reward is the untouched task objective — logged as mean_return so
         # it stays comparable to BPTT. Training uses the shaped reward, which is
