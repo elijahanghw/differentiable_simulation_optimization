@@ -28,12 +28,11 @@ make -C hitl native     # tuned for this CPU; don't copy the binary elsewhere
 ## Quick start
 
 ```sh
-# 1. bake ten episodes from the training scene config
-python hitl/tools/export_scene.py --config configs/train/navigate_real.yaml \
-    --seeds 0-9 --out-dir hitl/scenes
+# 1. bake ten episodes sized to your flight room (see hitl/configs/room.yaml)
+python hitl/tools/export_scene.py --hitl hitl/configs/room.yaml
 
 # 2. run the renderer (defaults: pose in on :5005, depth out to 127.0.0.1:5010)
-./hitl/depth_hitl --scene hitl/scenes/ep00.json --scene-dir hitl/scenes
+./hitl/depth_hitl --scene hitl/scenes/room00.json --scene-dir hitl/scenes
 
 # 3. in another shell, consume the frames
 python hitl/tools/recv_depth.py --port 5010
@@ -152,6 +151,58 @@ the preview against the real geometry.
 
 ## Scenes
 
+### Fitting the obstacle field to your room
+
+The training arena is not your flight volume, so [configs/room.yaml](configs/room.yaml)
+states only the differences and inherits the rest:
+
+```yaml
+base: ../../configs/train/navigate_real.yaml
+
+scene:
+  arena_x_min: -4.0
+  arena_x_max:  4.0
+  arena_y_min: -4.0
+  arena_y_max:  4.0
+  arena_z_min: -4.0     # NED — this is a 4 m ceiling
+  arena_z_max:  0.0
+  n_spheres:  3
+  n_boxes:    3
+  n_capsules: 3
+
+export:
+  seeds:   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  out_dir: hitl/scenes
+  prefix:  room
+```
+
+```sh
+python hitl/tools/export_scene.py --hitl hitl/configs/room.yaml
+```
+
+Any key of `SceneConfig` may go under `scene:` — spawn bounds, counts, or the size
+ranges (`sphere_r_min`, `box_hx_max`, `capsule_hh_min`, …) — and an unknown key is
+rejected rather than silently ignored. The training config is never touched, so the
+simulator keeps training on its own arena.
+
+The exporter prints the obstacle density either side of the change, because that is the
+number the policy is sensitive to:
+
+```
+arena    training   144.0 m³ /  18 obstacles = 0.125 per m³
+         this run   256.0 m³ /   9 obstacles = 0.035 per m³   (0.28× as dense)
+```
+
+Sparser than training is the safe direction for a first flight. Substantially denser
+means tighter clearances than the policy ever saw, and it says so.
+
+Keep obstacles inside the volume the mocap actually covers — the drone can only fly up
+to obstacles that exist where it can go — and remember `arena_z_max: 0.0` lets them sit
+on the floor, which is usually what you want since the ground plane is part of the
+trained scene.
+
+### Format
+
 One JSON file per episode, baked by
 [tools/export_scene.py](tools/export_scene.py) from the same `SceneConfig` used in
 training — `jax.random` cannot be reproduced in C++, so the obstacles are sampled in
@@ -236,6 +287,7 @@ python hitl/tools/recv_depth.py --port 5010 --count 100 --save live.npz
 | [src/netout.cpp](src/netout.cpp) | depth frame publisher |
 | [src/preview.cpp](src/preview.cpp) | terminal preview, PGM dump |
 | [src/main.cpp](src/main.cpp) | CLI, real-time loop, hotkeys |
+| [configs/room.yaml](configs/room.yaml) | your flight room: arena bounds and obstacle counts |
 | [tools/export_scene.py](tools/export_scene.py) | bake episodes from `SceneConfig` |
 | [tools/compare_with_jax.py](tools/compare_with_jax.py) | parity check against the simulator |
 | [tools/fake_mocap.py](tools/fake_mocap.py) | scripted pose source for bench testing |

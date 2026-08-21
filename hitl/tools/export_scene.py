@@ -170,6 +170,62 @@ def camera_block(depth_camera: dict, pool: int) -> dict:
     }
 
 
+def load_hitl_config(path: str) -> dict:
+    """
+    Read a hitl/configs/*.yaml: pull the training config it names in `base`,
+    then merge this file's `scene` / `depth_camera` blocks on top of it.
+
+    Only the keys present here are overridden, so a HITL config stays a short
+    statement of how the flight room differs from the training arena.
+    """
+    with open(path) as f:
+        hitl = yaml.safe_load(f) or {}
+
+    base_ref = hitl.get("base")
+    if not base_ref:
+        raise SystemExit(f"{path}: needs a `base:` pointing at a training config")
+    base_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), base_ref))
+    if not os.path.exists(base_path):
+        raise SystemExit(f"{path}: base config '{base_ref}' not found at {base_path}")
+
+    base = load_config(base_path)
+    scene = dict(base["env"]["scene"])
+    scene.update(hitl.get("scene") or {})
+    camera = dict(base.get("depth_camera") or {})
+    camera.update(hitl.get("depth_camera") or {})
+
+    unknown = set(scene) - set(SceneConfig.__dataclass_fields__)
+    if unknown:
+        raise SystemExit(f"{path}: unknown scene key(s): {', '.join(sorted(unknown))}")
+
+    return {
+        "scene": scene,
+        "depth_camera": camera,
+        "export": hitl.get("export") or {},
+        "base_path": base_path,
+        "source": path,
+    }
+
+
+def report_density(base_scene: dict, scene: dict) -> None:
+    """Obstacles per m³, before and after — the number that has to stay sane."""
+    def stats(s):
+        vol = ((s["arena_x_max"] - s["arena_x_min"])
+               * (s["arena_y_max"] - s["arena_y_min"])
+               * (s["arena_z_max"] - s["arena_z_min"]))
+        n = s.get("n_spheres", 0) + s.get("n_boxes", 0) + s.get("n_capsules", 0)
+        return vol, n, (n / vol if vol > 0 else 0.0)
+
+    bv, bn, bd = stats(base_scene)
+    nv, nn, nd = stats(scene)
+    print(f"arena    training {bv:7.1f} m³ / {bn:3d} obstacles = {bd:.3f} per m³")
+    print(f"         this run {nv:7.1f} m³ / {nn:3d} obstacles = {nd:.3f} per m³"
+          f"   ({nd / bd:.2f}× as dense)" if bd > 0 else "")
+    if bd > 0 and nd > 1.5 * bd:
+        print("         NOTE: denser than training — the policy may not have seen "
+              "clearances this tight")
+
+
 def parse_seeds(spec: str) -> list[int]:
     seeds = []
     for part in spec.split(","):
@@ -186,6 +242,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_argument_group("scene source")
+    src.add_argument("--hitl", help="HITL config (hitl/configs/*.yaml) — a training "
+                                    "config plus the room-specific overrides")
     src.add_argument("--config", help="train config (configs/train/*.yaml) — supplies "
                                       "env.scene and depth_camera")
     src.add_argument("--scene", help="scene YAML (configs/scene/*.yaml), instead of --config")
@@ -206,7 +264,16 @@ def main() -> int:
     args = ap.parse_args()
 
     # ---- resolve the scene + camera config ----
-    if args.config:
+    export_defaults = {}
+    base_scene = None
+    if args.hitl:
+        hitl         = load_hitl_config(args.hitl)
+        scene_dict   = hitl["scene"]
+        depth_camera = hitl["depth_camera"]
+        export_defaults = hitl["export"]
+        base_scene   = load_config(hitl["base_path"])["env"]["scene"]
+        source_name  = f"{args.hitl} (base {os.path.relpath(hitl['base_path'])})"
+    elif args.config:
         cfg_all      = load_config(args.config)
         scene_dict   = cfg_all["env"]["scene"]
         depth_camera = cfg_all.get("depth_camera", {})
@@ -221,13 +288,15 @@ def main() -> int:
             depth_camera = loaded.get("depth_camera", loaded)
         source_name = args.scene
     else:
-        ap.error("need --config or --scene")
+        ap.error("need --hitl, --config or --scene")
 
     if not isinstance(scene_dict, dict):
         ap.error("could not resolve the scene config to a dict")
 
     cam = camera_block(depth_camera, args.pool)
     cfg = SceneConfig(**scene_dict)
+    if base_scene is not None:
+        report_density(base_scene, scene_dict)
     if cfg.procedural:
         # Navigate.__init__ ties the cell size to the camera's max range.
         cfg.cell_size = cam["max_range"]
@@ -237,19 +306,25 @@ def main() -> int:
     print(cfg.summary())
 
     # ---- seeds and destinations ----
+    # A HITL config's `export:` block supplies these; CLI flags still win.
+    out_dir = args.out_dir or export_defaults.get("out_dir")
+    prefix  = args.prefix if args.prefix != "ep" else export_defaults.get("prefix", "ep")
+
     if args.seeds:
         seeds = parse_seeds(args.seeds)
-        if not args.out_dir:
-            ap.error("--seeds needs --out-dir")
     elif args.seed is not None:
         seeds = [args.seed]
+    elif export_defaults.get("seeds"):
+        seeds = [int(s) for s in export_defaults["seeds"]]
     else:
-        ap.error("need --seed or --seeds")
+        ap.error("need --seed or --seeds (or an export.seeds list in the HITL config)")
 
-    if not args.out and not args.out_dir:
+    if len(seeds) > 1 and not out_dir:
+        ap.error("several seeds need --out-dir (or export.out_dir in the HITL config)")
+    if not args.out and not out_dir:
         ap.error("need --out or --out-dir")
-    if args.out_dir:
-        os.makedirs(args.out_dir, exist_ok=True)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     for seed in seeds:
         geom = (sample_procedural(cfg, seed, args.bake_region) if cfg.procedural
@@ -257,7 +332,7 @@ def main() -> int:
         blocks = geometry_to_json(geom)
 
         path = (args.out if args.out and len(seeds) == 1
-                else os.path.join(args.out_dir, f"{args.prefix}{seed:02d}.json"))
+                else os.path.join(out_dir, f"{prefix}{seed:02d}.json"))
         name = os.path.splitext(os.path.basename(path))[0]
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 

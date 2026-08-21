@@ -1,0 +1,48 @@
+# Ground-station HITL config — the real flight room.
+#
+# Everything not listed here is inherited from `base`, so the training config
+# stays untouched: edit this file to fit the obstacle field to your room, and
+# the simulator keeps training on its own arena.
+#
+#   python hitl/tools/export_scene.py --hitl hitl/configs/room.yaml
+#
+# Coordinates are NED, same as training: x forward, y right, z DOWN, so the
+# floor is z = 0 and a 4 m ceiling is z = -4.
+
+base: ../../configs/train/navigate_real.yaml
+
+# ---------------------------------------------------------------------------
+# Obstacle spawn volume + counts. Merged onto the base config's env.scene
+# (configs/scene/obstacles.yaml), so only the keys below change.
+# ---------------------------------------------------------------------------
+scene:
+  # Physical flight volume: 8 × 8 × 4 m. Keep obstacles inside what the mocap
+  # actually covers — the drone can only "see" obstacles it can fly up to.
+  arena_x_min: -4.0
+  arena_x_max:  4.0
+  arena_y_min: -4.0
+  arena_y_max:  4.0
+  arena_z_min: -4.0
+  arena_z_max:  0.0
+
+  # 9 obstacles in 256 m³. Sparser than training (15 in 108 m³), which is the
+  # safe direction for a first flight — the exporter prints both densities.
+  n_spheres:  3
+  n_boxes:    3
+  n_capsules: 3
+
+# ---------------------------------------------------------------------------
+# Camera. Inherited from the base config's depth_camera block; uncomment only
+# to deliberately differ from what the policy trained with.
+# ---------------------------------------------------------------------------
+# depth_camera:
+#   max_range: 3.0
+#   cam_hz: 10.0
+
+# ---------------------------------------------------------------------------
+# What `export_scene.py --hitl` produces. CLI flags still win over these.
+# ---------------------------------------------------------------------------
+export:
+  seeds:   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  out_dir: hitl/scenes
+  prefix:  room
