@@ -524,21 +524,42 @@ int main(int argc, char** argv) {
             float rpy[3];
             quat_to_rpy_deg(cam_quat, rpy);
 
+            // A stale frame has three very different causes; naming the right
+            // one saves a debugging session.
+            std::string why;
+            if (stale) {
+                if (rx.packets_seen() == 0 && rx.packets_filtered() > 0) {
+                    why = "  ← " + std::to_string(rx.packets_filtered())
+                        + " packet(s) rejected by --rb-id "
+                        + std::to_string(o.rb_id) + "; the wire says id "
+                        + std::to_string(rx.last_filtered_id());
+                } else if (rx.packets_seen() == 0 && rx.packets_malformed() > 0) {
+                    why = "  ← packets arriving but malformed (last size "
+                        + std::to_string(rx.last_size()) + " bytes)";
+                } else if (rx.packets_seen() == 0) {
+                    why = "  ← nothing on udp:" + std::to_string(o.in_port)
+                        + " (sender pointed elsewhere, or another process holds the port)";
+                } else {
+                    why = "  ← stream stopped " + std::to_string(pose_age / 1000) + " ms ago";
+                }
+            }
+
             char line[1024];
             int n = std::snprintf(line, sizeof(line),
                 "\x1b[1m%s\x1b[0m  %zu prims   %.2f Hz   jitter avg %+.2f ms / max %.2f ms   "
                 "overruns %llu\n"
-                "render %.3f ms   pose %s (id %u, %.1f ms old)   rx %llu pkts (%llu dropped)   "
-                "tx %llu frames\n"
+                "render %.3f ms   pose %s (id %u, %.1f ms old)%s\n"
+                "rx %llu pkts (%llu filtered, %llu malformed)   tx %llu frames\n"
                 "pos [% 7.3f % 7.3f % 7.3f]   rpy [% 6.1f % 6.1f % 6.1f]°%s%s",
                 scene.name.c_str(), scene.n_prims(), o.rate_hz,
                 seq ? jitter_sum / seq : 0.0, jitter_max,
                 static_cast<unsigned long long>(overruns),
                 render_ms,
                 stale ? "\x1b[31mSTALE\x1b[0m" : "\x1b[32mok\x1b[0m",
-                pose.rb_id, static_cast<double>(meta.pose_age_us) / 1000.0,
+                pose.rb_id, static_cast<double>(meta.pose_age_us) / 1000.0, why.c_str(),
                 static_cast<unsigned long long>(rx.packets_seen()),
-                static_cast<unsigned long long>(rx.packets_dropped()),
+                static_cast<unsigned long long>(rx.packets_filtered()),
+                static_cast<unsigned long long>(rx.packets_malformed()),
                 static_cast<unsigned long long>(tx.sent()),
                 cam_pos[0], cam_pos[1], cam_pos[2], rpy[0], rpy[1], rpy[2],
                 message.empty() ? "" : "\n", message.c_str());

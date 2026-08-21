@@ -49,16 +49,23 @@ public:
     // Blocking-ish hexdump of the next `count` packets, for wire debugging.
     void sniff(int count, int timeout_ms);
 
-    uint64_t packets_seen()    const { return packets_; }
-    uint64_t packets_dropped() const { return dropped_; }
-    int      last_size()       const { return last_size_; }
+    uint64_t packets_seen()      const { return packets_; }
+    uint64_t packets_dropped()   const { return malformed_ + filtered_; }
+    uint64_t packets_filtered()  const { return filtered_; }   // wrong rigid-body id
+    uint64_t packets_malformed() const { return malformed_; }  // bad size / not finite
+    int      last_size()         const { return last_size_; }
+    // Id of the most recent packet rejected by the --rb-id filter, so a
+    // mismatch reports the id that is actually on the wire.
+    long     last_filtered_id()  const { return last_filtered_id_; }
 
 private:
-    int      fd_        = -1;
-    int      rb_filter_ = -1;
-    uint64_t packets_   = 0;
-    uint64_t dropped_   = 0;   // wrong size, or filtered out by rigid-body id
-    int      last_size_ = 0;
+    int      fd_              = -1;
+    int      rb_filter_       = -1;
+    uint64_t packets_         = 0;
+    uint64_t filtered_        = 0;
+    uint64_t malformed_       = 0;
+    int      last_size_       = 0;
+    long     last_filtered_id_ = -1;
 };
 
 // CLOCK_MONOTONIC in microseconds — one place so every timestamp agrees.

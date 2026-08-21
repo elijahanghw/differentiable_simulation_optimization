@@ -87,10 +87,14 @@ int MocapReceiver::drain(Pose& latest) {
             break;
         }
         last_size_ = static_cast<int>(n);
-        if (static_cast<size_t>(n) < kMinPacket) { ++dropped_; continue; }
+        if (static_cast<size_t>(n) < kMinPacket) { ++malformed_; continue; }
 
         uint32_t id = read_le<uint32_t>(buf);
-        if (rb_filter_ >= 0 && id != static_cast<uint32_t>(rb_filter_)) { ++dropped_; continue; }
+        if (rb_filter_ >= 0 && id != static_cast<uint32_t>(rb_filter_)) {
+            ++filtered_;
+            last_filtered_id_ = static_cast<long>(id);
+            continue;
+        }
 
         Pose p;
         p.rb_id   = id;
@@ -107,7 +111,7 @@ int MocapReceiver::drain(Pose& latest) {
         const float qn = std::sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
         if (!(qn > 1e-6f) || !std::isfinite(p.pos[0]) || !std::isfinite(p.pos[1])
             || !std::isfinite(p.pos[2])) {
-            ++dropped_;
+            ++malformed_;
             continue;
         }
         p.quat[0] = qw / qn; p.quat[1] = qx / qn;
@@ -158,8 +162,19 @@ void MocapReceiver::sniff(int count, int timeout_ms) {
             std::printf("\n");
         }
         if (n >= static_cast<ssize_t>(kMinPacket)) {
-            std::printf("  id=%u  t=%llu us\n", read_le<uint32_t>(buf),
-                        static_cast<unsigned long long>(read_le<uint64_t>(buf + 4)));
+            const uint32_t id = read_le<uint32_t>(buf);
+            // Report the filter verdict here too: a sniff that shows packets
+            // while the render loop reports STALE is almost always a wrong
+            // --rb-id, and that is invisible unless it is said out loud.
+            const char* verdict = (rb_filter_ < 0)              ? "accepted (no --rb-id filter)"
+                                : (id == static_cast<uint32_t>(rb_filter_))
+                                                                 ? "accepted (matches --rb-id)"
+                                                                 : "REJECTED — does not match --rb-id";
+            std::printf("  id=%u  t=%llu us   → %s\n", id,
+                        static_cast<unsigned long long>(read_le<uint64_t>(buf + 4)), verdict);
+            if (rb_filter_ >= 0 && id != static_cast<uint32_t>(rb_filter_))
+                std::printf("  hint: rerun with --rb-id %u, or drop the flag to accept any body\n",
+                            id);
             std::printf("  pos  = [% .4f, % .4f, % .4f]\n",
                         read_le<float>(buf + 12), read_le<float>(buf + 16), read_le<float>(buf + 20));
             std::printf("  quat = [qw % .4f, qx % .4f, qy % .4f, qz % .4f]\n",
