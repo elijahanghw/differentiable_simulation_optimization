@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstdint>
+#include <netinet/in.h>
 #include <string>
 
 struct Pose {
@@ -42,9 +43,28 @@ public:
     MocapReceiver(const MocapReceiver&)            = delete;
     MocapReceiver& operator=(const MocapReceiver&) = delete;
 
+    // Relay every accepted pose datagram, byte for byte, to another host — for
+    // when the mocap client can only unicast to one destination and the drone's
+    // companion computer needs the stream too.
+    //
+    // Forwarding happens inside drain(), per packet, so the destination gets the
+    // full mocap rate. Publishing the pose alongside the depth frames instead
+    // would cap it at the render rate, which is an order of magnitude too slow
+    // for a 100 Hz controller.
+    //
+    // Only packets that pass the size, --rb-id and finiteness checks are
+    // relayed, and they go out unmodified: the receiver sees exactly the bytes
+    // the mocap client sent, timestamps and 72/76-byte variant included.
+    void forward_to(const std::string& host, uint16_t port);
+
     // Drains the socket and keeps the newest acceptable packet. Returns the
     // number of packets read. Never blocks.
     int drain(Pose& latest);
+
+    // Blocks for up to timeout_ms waiting for a packet to arrive. >0 if one is
+    // ready. Lets the caller relay poses as they land rather than once per
+    // render tick — see forward_to().
+    int wait(int timeout_ms);
 
     // Blocking-ish hexdump of the next `count` packets, for wire debugging.
     void sniff(int count, int timeout_ms);
@@ -58,14 +78,23 @@ public:
     // mismatch reports the id that is actually on the wire.
     long     last_filtered_id()  const { return last_filtered_id_; }
 
+    bool     forwarding()        const { return fwd_fd_ >= 0; }
+    uint64_t forwarded()         const { return forwarded_; }
+    uint64_t forward_errors()    const { return fwd_errors_; }
+
 private:
-    int      fd_              = -1;
-    int      rb_filter_       = -1;
-    uint64_t packets_         = 0;
-    uint64_t filtered_        = 0;
-    uint64_t malformed_       = 0;
-    int      last_size_       = 0;
-    long     last_filtered_id_ = -1;
+    int         fd_              = -1;
+    int         rb_filter_       = -1;
+    uint64_t    packets_         = 0;
+    uint64_t    filtered_        = 0;
+    uint64_t    malformed_       = 0;
+    int         last_size_       = 0;
+    long        last_filtered_id_ = -1;
+
+    int         fwd_fd_          = -1;
+    sockaddr_in fwd_dest_{};
+    uint64_t    forwarded_       = 0;
+    uint64_t    fwd_errors_      = 0;
 };
 
 // CLOCK_MONOTONIC in microseconds — one place so every timestamp agrees.

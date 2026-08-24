@@ -60,7 +60,7 @@ bool DepthSender::send_buffer(const FrameMeta& meta, uint16_t payload_type,
     put<uint16_t>(buf_,  6, meta.flags);
     put<uint32_t>(buf_,  8, meta.seq);
     put<uint16_t>(buf_, 12, payload_type);
-    put<uint16_t>(buf_, 14, 0);
+    put<uint16_t>(buf_, 14, meta.encode_us);
     put<uint16_t>(buf_, 16, static_cast<uint16_t>(rows));
     put<uint16_t>(buf_, 18, static_cast<uint16_t>(cols));
     put<uint32_t>(buf_, 20, static_cast<uint32_t>(payload_bytes));
@@ -82,6 +82,13 @@ bool DepthSender::send_buffer(const FrameMeta& meta, uint16_t payload_type,
 bool DepthSender::send_pooled(const FrameMeta& meta, const float* data, int rows, int cols) {
     return send_buffer(meta, PAYLOAD_POOLED_F32, rows, cols,
                        data, static_cast<size_t>(rows) * cols * sizeof(float));
+}
+
+bool DepthSender::send_features(const FrameMeta& meta, const float* feat, int dim) {
+    // rows=1, cols=dim: a feature vector is a 1×N frame as far as the header goes,
+    // so nothing downstream needs a special case to find its length.
+    return send_buffer(meta, PAYLOAD_FEATURES_F32, 1, dim,
+                       feat, static_cast<size_t>(dim) * sizeof(float));
 }
 
 bool DepthSender::send_raw_mm(const FrameMeta& meta, const float* metres, int rows, int cols) {

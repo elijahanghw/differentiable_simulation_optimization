@@ -44,7 +44,8 @@ import rerun as rr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from recv_depth import PAYLOAD_POOLED_F32, PAYLOAD_RAW_U16_MM, decode
+from recv_depth import (PAYLOAD_FEATURES_F32, PAYLOAD_POOLED_F32,
+                        PAYLOAD_RAW_U16_MM, decode)
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +212,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene", required=True, help="the scene JSON depth_hitl is running")
-    ap.add_argument("--port", type=int, default=5010, help="pooled tensor port [5010]")
+    ap.add_argument("--port", type=int, default=5010,
+                    help="main output port [5010]: the pooled tensor, or the CNN "
+                         "latent when depth_hitl runs with --encode")
     ap.add_argument("--raw-port", type=int, default=5011,
                     help="full-resolution frame port [5011]; needs depth_hitl --raw-out")
+    ap.add_argument("--pooled-port", type=int, default=5012,
+                    help="pooled tensor side channel [5012]; needs depth_hitl "
+                         "--encode --pooled-out, and is what keeps the cnn_input "
+                         "view alive once the main port carries the latent")
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--drone", default="configs/drone/2inchwhoop.yaml",
                     help="drone config, for drawing the airframe (optional)")
@@ -266,7 +273,8 @@ def main() -> int:
     log_airframe_static(motor_pos_body, body_radius)
 
     socks = {}
-    for port, kind in ((args.port, "pooled"), (args.raw_port, "raw")):
+    for port, kind in ((args.port, "main"), (args.raw_port, "raw"),
+                       (args.pooled_port, "pooled side channel")):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -314,24 +322,36 @@ def main() -> int:
                 rr.set_time("time", duration=(frame.send_time_us - t0) / 1e6)
                 rr.set_time("frame", sequence=frame.seq)
 
-                is_raw = frame.payload_type == PAYLOAD_RAW_U16_MM
-                have_raw = have_raw or is_raw
+                is_raw      = frame.payload_type == PAYLOAD_RAW_U16_MM
+                is_features = frame.payload_type == PAYLOAD_FEATURES_F32
+                have_raw    = have_raw or is_raw
 
-                # The full-resolution frame wins the frustum; the pooled tensor is
-                # what the CNN actually eats, so show it in its own view.
-                depth_m = to_metres(frame, cam)
-                if is_raw or not have_raw:
-                    # Metric, so rerun back-projects it into the frustum as points.
-                    rr.log("drone/camera/depth", rr.DepthImage(
-                        depth_m, meter=1.0, colormap=args.colormap,
-                        depth_range=(0.0, float(cam["max_range"]))))
-                    # Same frame, inverted for legibility: close is bright.
-                    rr.log("view/proximity", rr.Image(to_proximity(depth_m, cam)))
-                if frame.payload_type == PAYLOAD_POOLED_F32:
-                    # The tensor exactly as the policy receives it — already
-                    # "bright is close", since v = 3/clip(d) - 0.6.
-                    rr.log("cnn_input", rr.Image(
-                        np.asarray(frame.data, np.float32) / cnn_full_scale))
+                # A latent has no spatial layout, so nothing image-shaped can be
+                # made of it — it gets its own view and skips the depth handling
+                # entirely. Its header still carries the pose and the health
+                # fields, so the map keeps updating when it is the only stream.
+                depth_m = None
+                if is_features:
+                    # 64 bars. Not interpretable pixel by pixel, but it makes an
+                    # encoder that has gone constant or saturated obvious at a glance.
+                    rr.log("cnn_latent", rr.BarChart(frame.features))
+                    rr.log("health/encode_ms", rr.Scalars(frame.encode_us / 1000.0))
+                else:
+                    # The full-resolution frame wins the frustum; the pooled tensor
+                    # is what the CNN actually eats, so show it in its own view.
+                    depth_m = to_metres(frame, cam)
+                    if is_raw or not have_raw:
+                        # Metric, so rerun back-projects it into the frustum as points.
+                        rr.log("drone/camera/depth", rr.DepthImage(
+                            depth_m, meter=1.0, colormap=args.colormap,
+                            depth_range=(0.0, float(cam["max_range"]))))
+                        # Same frame, inverted for legibility: close is bright.
+                        rr.log("view/proximity", rr.Image(to_proximity(depth_m, cam)))
+                    if frame.payload_type == PAYLOAD_POOLED_F32:
+                        # The tensor exactly as the policy receives it — already
+                        # "bright is close", since v = 3/clip(d) - 0.6.
+                        rr.log("cnn_input", rr.Image(
+                            np.asarray(frame.data, np.float32) / cnn_full_scale))
 
                 # Pose only needs logging once per timestamp; the pooled frame and
                 # the raw frame of a given seq carry the same one.
@@ -345,8 +365,9 @@ def main() -> int:
                 rr.log("health/pose_age_ms", rr.Scalars(frame.pose_age_us / 1000.0))
                 rr.log("health/render_ms",   rr.Scalars(frame.render_us / 1000.0))
                 rr.log("health/stale",       rr.Scalars(float(frame.stale)))
-                rr.log("health/nearest_m",   rr.Scalars(float(depth_m[depth_m > 0].min())
-                                                        if (depth_m > 0).any() else 0.0))
+                if depth_m is not None:
+                    rr.log("health/nearest_m", rr.Scalars(float(depth_m[depth_m > 0].min())
+                                                          if (depth_m > 0).any() else 0.0))
 
                 n += 1
                 arrival = time.monotonic()

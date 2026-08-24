@@ -4,7 +4,7 @@
 # stays untouched: edit this file to fit the obstacle field to your room, and
 # the simulator keeps training on its own arena.
 #
-#   python hitl/tools/export_scene.py --hitl hitl/configs/room.yaml
+#   python hitl/tools/export_scene.py --hitl hitl/configs/cyberzoo.yaml
 #
 # Coordinates are NED, same as training: x forward, y right, z DOWN, so the
 # floor is z = 0 and a 4 m ceiling is z = -4.
@@ -18,10 +18,10 @@ base: ../../configs/train/navigate_real.yaml
 scene:
   # Physical flight volume: 8 × 8 × 4 m. Keep obstacles inside what the mocap
   # actually covers — the drone can only "see" obstacles it can fly up to.
-  arena_x_min: -4.0
-  arena_x_max:  4.0
-  arena_y_min: -4.0
-  arena_y_max:  4.0
+  arena_x_min: -3.0
+  arena_x_max:  3.0
+  arena_y_min: -3.0
+  arena_y_max:  3.0
   arena_z_min: -4.0
   arena_z_max:  0.0
 
@@ -45,4 +45,4 @@ scene:
 export:
   seeds:   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   out_dir: hitl/scenes
-  prefix:  room
+  prefix:  cyberzoo

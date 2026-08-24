@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "encoder.hpp"
 #include "mocap.hpp"
 #include "netout.hpp"
 #include "preview.hpp"
@@ -37,6 +39,11 @@ namespace {
 volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 
+// Most --sync-pose may move one render deadline. Bounds how far the period can
+// deviate from --rate while the phase is being acquired: at 10 Hz this is 5%,
+// and a 50 ms correction takes ten frames (one second) to slew out.
+constexpr long long kMaxPhaseNudgeUs = 5000;
+
 struct Options {
     std::string scene_path;
     std::string scene_dir;
@@ -45,13 +52,32 @@ struct Options {
     uint16_t    in_port   = 5005;      // relay.cpp's OPTITRACK_PORT
     int         rb_id     = -1;        // -1 = accept any rigid body
 
+    // Relay the pose stream on to a second machine (the drone's companion
+    // computer), for when the mocap client can only unicast to one destination.
+    std::string pose_fwd_host;                 // empty = no forwarding
+    uint16_t    pose_fwd_port = 5005;           // same port as we listen on
+
     std::string out_host  = "127.0.0.1";
     uint16_t    out_port  = 5010;
     bool        raw_out   = false;
     uint16_t    raw_port  = 5011;
 
+    // --encode: run the CNN here and publish the latent on --out-port instead of
+    // the 12×16 tensor. --pooled-port keeps the tensor available on a side channel
+    // for live_view and debugging.
+    bool        encode      = false;
+    bool        pooled_out  = false;
+    uint16_t    pooled_port = 5012;
+    bool        print_features = false;
+
     double      rate_hz   = 0.0;       // 0 = take cam_hz from the scene file
     bool        realtime  = false;
+
+    // Phase-lock the render deadline to pose arrivals, so frames are rendered
+    // from a fresh pose instead of whatever the free-running phase happens to
+    // give. Worth it when the mocap rate is low: see --sync-pose in the usage.
+    bool        sync_pose      = false;
+    int         sync_target_ms = 5;
     bool        preview   = true;
     bool        print_pooled = false;
     int         pose_timeout_ms = 200;
@@ -85,6 +111,8 @@ void usage() {
 "  --in-addr ADDR       interface to bind                [0.0.0.0]\n"
 "  --rb-id N            only accept this streaming id    [any]\n"
 "  --pose-timeout-ms N  flag the frame stale after this  [200]\n"
+"  --pose-forward IP[:PORT]  relay each accepted pose datagram, unchanged and\n"
+"                       at full mocap rate, to another host [port 5005]\n"
 "\n"
 "Depth output\n"
 "  --out-host HOST      destination for the depth tensor [127.0.0.1]\n"
@@ -92,9 +120,20 @@ void usage() {
 "  --raw-out            also publish the full-res uint16 mm frame\n"
 "  --raw-port N                                          [5011]\n"
 "\n"
+"Encoder (send the CNN latent instead of the depth tensor)\n"
+"  --encode             run the policy's CNN here; --out-port carries the\n"
+"                       latent, which is what the split deployment sends\n"
+"  --pooled-out         with --encode, also publish the 12x16 tensor\n"
+"  --pooled-port N      where                                [5012]\n"
+"  --print-features     print the latent under the preview\n"
+"\n"
 "Timing\n"
 "  --rate HZ            render rate    [the scene file's camera cam_hz]\n"
 "  --rt                 SCHED_FIFO + mlockall (needs privileges)\n"
+"  --sync-pose          slew the render phase so frames use a fresh pose;\n"
+"                       worth it on a low-rate mocap, where the free-running\n"
+"                       phase can otherwise sit a whole mocap period stale\n"
+"  --sync-target-ms N   pose age --sync-pose aims for        [5]\n"
 "\n"
 "Camera mount (rigid-body frame → camera; defaults match the simulator)\n"
 "  --cam-offset x,y,z   camera offset in body FRD metres [0,0,0]\n"
@@ -132,6 +171,17 @@ void parse_triplet(const char* s, float out[3], const char* flag) {
         die(std::string(flag) + " expects x,y,z");
 }
 
+// "10.0.0.7" or "10.0.0.7:5005" → host, port. Leaves `port` alone when absent.
+void parse_host_port(const std::string& s, std::string& host, uint16_t& port,
+                     const char* flag) {
+    const size_t colon = s.rfind(':');
+    if (colon == std::string::npos) { host = s; return; }
+    host = s.substr(0, colon);
+    const int p = std::atoi(s.c_str() + colon + 1);
+    if (p <= 0 || p > 65535) die(std::string(flag) + ": bad port in '" + s + "'");
+    port = static_cast<uint16_t>(p);
+}
+
 Options parse_args(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
@@ -142,12 +192,21 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--in-addr")      o.in_addr    = need(argc, argv, i, "--in-addr");
         else if (a == "--rb-id")        o.rb_id      = std::atoi(need(argc, argv, i, "--rb-id"));
         else if (a == "--pose-timeout-ms") o.pose_timeout_ms = std::atoi(need(argc, argv, i, "--pose-timeout-ms"));
+        else if (a == "--pose-forward") parse_host_port(need(argc, argv, i, "--pose-forward"),
+                                                        o.pose_fwd_host, o.pose_fwd_port,
+                                                        "--pose-forward");
         else if (a == "--out-host")     o.out_host   = need(argc, argv, i, "--out-host");
         else if (a == "--out-port")     o.out_port   = static_cast<uint16_t>(std::atoi(need(argc, argv, i, "--out-port")));
         else if (a == "--raw-out")      o.raw_out    = true;
         else if (a == "--raw-port")     o.raw_port   = static_cast<uint16_t>(std::atoi(need(argc, argv, i, "--raw-port")));
+        else if (a == "--encode")       o.encode     = true;
+        else if (a == "--pooled-out")   o.pooled_out = true;
+        else if (a == "--pooled-port")  o.pooled_port = static_cast<uint16_t>(std::atoi(need(argc, argv, i, "--pooled-port")));
+        else if (a == "--print-features") o.print_features = true;
         else if (a == "--rate")         o.rate_hz    = std::atof(need(argc, argv, i, "--rate"));
         else if (a == "--rt")           o.realtime   = true;
+        else if (a == "--sync-pose")    o.sync_pose  = true;
+        else if (a == "--sync-target-ms") o.sync_target_ms = std::atoi(need(argc, argv, i, "--sync-target-ms"));
         else if (a == "--no-preview")   o.preview    = false;
         else if (a == "--print-pooled") o.print_pooled = true;
         else if (a == "--cam-offset")   parse_triplet(need(argc, argv, i, "--cam-offset"), o.mount.offset_body, "--cam-offset");
@@ -334,7 +393,7 @@ void enable_realtime() {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     Options o = parse_args(argc, argv);
     set_mount_rpy(o.mount, o.mount_rpy[0], o.mount_rpy[1], o.mount_rpy[2]);
 
@@ -371,25 +430,62 @@ int main(int argc, char** argv) {
     if (rate_from_scene) o.rate_hz = cam.cam_hz;
 
     describe(scene, cam, o);
-    std::printf("rate    %.2f Hz%s\n", o.rate_hz,
-                rate_from_scene ? "  (from the scene file's cam_hz)" : "  (--rate)");
+    std::printf("rate    %.2f Hz%s%s\n", o.rate_hz,
+                rate_from_scene ? "  (from the scene file's cam_hz)" : "  (--rate)",
+                o.sync_pose ? "  + phase-locked to the pose stream" : "");
 
     if (!o.one_pose.empty() || !o.poses_file.empty()) return run_offline(o, scene, cam);
 
     RenderBuffers buf;
     buf.resize(cam);
 
+    // The encoder is stateless, so it needs no reset across scene changes — but
+    // its input shape is fixed at generation time, so a scene whose camera pools
+    // to something else has to fail here rather than silently mis-feed the CNN.
+    std::vector<float> features;
+    if (o.encode) {
+        if (!Encoder::available()) die("--encode: " + Encoder::unavailable_reason());
+        std::string err = Encoder::check_shape(cam.pooled_h(), cam.pooled_w());
+        if (!err.empty()) die("--encode: " + err);
+        features.assign(static_cast<size_t>(Encoder::feature_dim()), 0.0f);
+    } else if (o.pooled_out || o.print_features) {
+        die("--pooled-out / --print-features only mean something with --encode");
+    }
+
     MocapReceiver rx(o.in_addr, o.in_port, o.rb_id);
+    if (!o.pose_fwd_host.empty()) {
+        // Forwarding to the port we listen on, on this machine, would relay every
+        // packet straight back to ourselves and amplify without bound.
+        const bool loopback = o.pose_fwd_host == "127.0.0.1" || o.pose_fwd_host == "localhost";
+        if (loopback && o.pose_fwd_port == o.in_port)
+            die("--pose-forward " + o.pose_fwd_host + ":" + std::to_string(o.pose_fwd_port)
+                + " is the port this process listens on — that is a feedback loop");
+        rx.forward_to(o.pose_fwd_host, o.pose_fwd_port);
+    }
     DepthSender   tx(o.out_host, o.out_port);
-    std::unique_ptr<DepthSender> tx_raw;
-    if (o.raw_out) tx_raw.reset(new DepthSender(o.out_host, o.raw_port));
+    std::unique_ptr<DepthSender> tx_raw, tx_pooled;
+    if (o.raw_out)    tx_raw.reset(new DepthSender(o.out_host, o.raw_port));
+    if (o.pooled_out) tx_pooled.reset(new DepthSender(o.out_host, o.pooled_port));
 
     const std::string rb_note = o.rb_id >= 0
         ? "  (rigid body " + std::to_string(o.rb_id) + ")" : "  (any rigid body)";
     std::printf("pose in  udp %s:%u%s\n", o.in_addr.c_str(), o.in_port, rb_note.c_str());
-    std::printf("depth out udp %s:%u  (%d floats/frame)%s\n",
-                o.out_host.c_str(), o.out_port, cam.pooled(),
-                o.raw_out ? "  + raw frames" : "");
+    if (rx.forwarding())
+        std::printf("pose fwd udp %s:%u  (verbatim, full mocap rate)\n",
+                    o.pose_fwd_host.c_str(), o.pose_fwd_port);
+    if (o.encode) {
+        std::printf("latent out udp %s:%u  (%d floats/frame, CNN %dx%d -> %d)%s\n",
+                    o.out_host.c_str(), o.out_port, Encoder::feature_dim(),
+                    Encoder::input_rows(), Encoder::input_cols(), Encoder::feature_dim(),
+                    o.raw_out ? "  + raw frames" : "");
+        if (tx_pooled)
+            std::printf("depth out udp %s:%u  (%d floats/frame, side channel)\n",
+                        o.out_host.c_str(), o.pooled_port, cam.pooled());
+    } else {
+        std::printf("depth out udp %s:%u  (%d floats/frame)%s\n",
+                    o.out_host.c_str(), o.out_port, cam.pooled(),
+                    o.raw_out ? "  + raw frames" : "");
+    }
     std::printf("\n");
 
     if (o.realtime) enable_realtime();
@@ -414,6 +510,7 @@ int main(int argc, char** argv) {
     double   jitter_sum = 0.0;
     double   jitter_max = 0.0;
     double   render_ms  = 0.0;
+    double   encode_ms  = 0.0;
     uint64_t saved_frames = 0;
     std::string message;
 
@@ -436,6 +533,29 @@ int main(int argc, char** argv) {
             ++overruns;
         }
 
+        // Read poses as they arrive rather than once per render tick. Two things
+        // depend on it:
+        //
+        //   * Pose.recv_us is stamped when drain() reads a packet, so draining
+        //     only at the tick makes every pose look freshly arrived and the age
+        //     this reports — in the status line, in the frame header, and to
+        //     --sync-pose — collapses to ~0 regardless of how stale the pose is.
+        //   * --pose-forward would otherwise hold each packet for up to a render
+        //     period and relay the backlog as a burst: average rate correct, but
+        //     not a stream a 100 Hz controller can fly on.
+        //
+        // The last couple of ms still go to clock_nanosleep, because poll() has
+        // millisecond granularity and the render cadence is worth sub-ms.
+        for (;;) {
+            timespec now2;
+            clock_gettime(CLOCK_MONOTONIC, &now2);
+            const long long rem_us = (next.tv_sec  - now2.tv_sec)  * 1000000LL
+                                   + (next.tv_nsec - now2.tv_nsec) / 1000;
+            if (rem_us <= 2000 || g_stop) break;
+            if (rx.wait(static_cast<int>((rem_us - 2000) / 1000)) > 0)
+                rx.drain(pose);          // also forwards, when --pose-forward is on
+        }
+
         int rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
         if (rc == EINTR) continue;
 
@@ -456,6 +576,29 @@ int main(int argc, char** argv) {
         const bool     stale      = !pose.valid ||
             pose_age > static_cast<uint64_t>(o.pose_timeout_ms) * 1000ull;
 
+        // Phase-lock to the mocap. The render cadence and the pose stream are
+        // independent clocks, so the age of the pose a frame is rendered from is
+        // whatever their relative phase happens to be — constant through a flight,
+        // but anywhere from 0 to a full mocap period, and not something you get to
+        // choose. On a 20 Hz mocap that is up to 50 ms of lag baked into the depth
+        // image, which at 2 m/s is 10 cm of position error the CNN never sees.
+        //
+        // Rendering a touch earlier lands the deadline earlier against the pose
+        // grid and lowers the age one-for-one, so steer the deadline until the age
+        // sits at --sync-target-ms. The slew is capped per cycle, which keeps the
+        // period within a few percent of the rate the policy trained at while it
+        // acquires; the target is a few ms rather than zero so mocap jitter cannot
+        // push us just ahead of an arrival and cost a whole period.
+        if (o.sync_pose && !stale && pose.valid) {
+            long long nudge_us = static_cast<long long>(pose_age)
+                               - static_cast<long long>(o.sync_target_ms) * 1000;
+            nudge_us = std::max<long long>(-kMaxPhaseNudgeUs,
+                       std::min<long long>( kMaxPhaseNudgeUs, nudge_us));
+            next.tv_nsec -= nudge_us * 1000;
+            while (next.tv_nsec <     0L)      { next.tv_nsec += 1000000000L; --next.tv_sec; }
+            while (next.tv_nsec >= 1000000000L){ next.tv_nsec -= 1000000000L; ++next.tv_sec; }
+        }
+
         float cam_pos[3], cam_quat[4];
         apply_mount(o.mount, pose.pos, pose.quat, cam_pos, cam_quat);
 
@@ -464,17 +607,41 @@ int main(int argc, char** argv) {
         const uint64_t t1 = mono_us();
         render_ms = static_cast<double>(t1 - t0) / 1000.0;
 
+        uint64_t encode_us = 0;
+        if (o.encode) {
+            const uint64_t t2 = mono_us();
+            Encoder::run(buf.pooled.data(), features.data());
+            encode_us = mono_us() - t2;
+            encode_ms = static_cast<double>(encode_us) / 1000.0;
+        }
+
         FrameMeta meta;
         meta.seq          = seq++;
         meta.flags        = stale ? FLAG_STALE_POSE : 0;
+        meta.encode_us    = static_cast<uint16_t>(std::min<uint64_t>(encode_us, UINT16_MAX));
         meta.pose_time_us = pose.time_us;
         meta.pose_age_us  = static_cast<uint32_t>(std::min<uint64_t>(pose_age, UINT32_MAX));
         meta.render_us    = static_cast<uint32_t>(t1 - t0);
         std::memcpy(meta.pos,  cam_pos,  sizeof(meta.pos));
         std::memcpy(meta.quat, cam_quat, sizeof(meta.quat));
 
-        tx.send_pooled(meta, buf.pooled.data(), cam.pooled_h(), cam.pooled_w());
-        if (tx_raw) tx_raw->send_raw_mm(meta, buf.raw.data(), cam.height, cam.width);
+        if (o.encode) {
+            tx.send_features(meta, features.data(), static_cast<int>(features.size()));
+        } else {
+            tx.send_pooled(meta, buf.pooled.data(), cam.pooled_h(), cam.pooled_w());
+        }
+        // The side channels carry the same meta, so a consumer can line the pooled
+        // tensor up with the latent it produced by seq.
+        if (tx_pooled) {
+            FrameMeta side = meta;
+            side.encode_us = 0;          // this datagram carries no features
+            tx_pooled->send_pooled(side, buf.pooled.data(), cam.pooled_h(), cam.pooled_w());
+        }
+        if (tx_raw) {
+            FrameMeta side = meta;
+            side.encode_us = 0;
+            tx_raw->send_raw_mm(side, buf.raw.data(), cam.height, cam.width);
+        }
 
         // ---- hotkeys ----
         int key = term.poll_key();
@@ -494,6 +661,12 @@ int main(int argc, char** argv) {
                 Scene  new_scene;
                 load_scene(path, new_scene, new_cam);
                 apply_overrides(o, new_cam);
+                // A scene whose camera pools to a different shape would feed the
+                // CNN garbage. Refuse the swap instead, and keep flying the old one.
+                if (o.encode) {
+                    std::string err = Encoder::check_shape(new_cam.pooled_h(), new_cam.pooled_w());
+                    if (!err.empty()) throw std::runtime_error(path + ": " + err);
+                }
                 scene         = std::move(new_scene);
                 cam           = new_cam;
                 o.scene_path  = path;
@@ -544,23 +717,35 @@ int main(int argc, char** argv) {
                 }
             }
 
+            char enc[64] = "";
+            if (o.encode)
+                std::snprintf(enc, sizeof(enc), "   encode %.3f ms", encode_ms);
+
+            std::string fwd;
+            if (rx.forwarding()) {
+                fwd = "   fwd " + std::to_string(rx.forwarded()) + " → "
+                    + o.pose_fwd_host + ":" + std::to_string(o.pose_fwd_port);
+                if (rx.forward_errors())
+                    fwd += "  \x1b[31m" + std::to_string(rx.forward_errors()) + " failed\x1b[0m";
+            }
+
             char line[1024];
             int n = std::snprintf(line, sizeof(line),
                 "\x1b[1m%s\x1b[0m  %zu prims   %.2f Hz   jitter avg %+.2f ms / max %.2f ms   "
                 "overruns %llu\n"
-                "render %.3f ms   pose %s (id %u, %.1f ms old)%s\n"
-                "rx %llu pkts (%llu filtered, %llu malformed)   tx %llu frames\n"
+                "render %.3f ms%s   pose %s (id %u, %.1f ms old)%s\n"
+                "rx %llu pkts (%llu filtered, %llu malformed)   tx %llu frames%s\n"
                 "pos [% 7.3f % 7.3f % 7.3f]   rpy [% 6.1f % 6.1f % 6.1f]°%s%s",
                 scene.name.c_str(), scene.n_prims(), o.rate_hz,
                 seq ? jitter_sum / seq : 0.0, jitter_max,
                 static_cast<unsigned long long>(overruns),
-                render_ms,
+                render_ms, enc,
                 stale ? "\x1b[31mSTALE\x1b[0m" : "\x1b[32mok\x1b[0m",
                 pose.rb_id, static_cast<double>(meta.pose_age_us) / 1000.0, why.c_str(),
                 static_cast<unsigned long long>(rx.packets_seen()),
                 static_cast<unsigned long long>(rx.packets_filtered()),
                 static_cast<unsigned long long>(rx.packets_malformed()),
-                static_cast<unsigned long long>(tx.sent()),
+                static_cast<unsigned long long>(tx.sent()), fwd.c_str(),
                 cam_pos[0], cam_pos[1], cam_pos[2], rpy[0], rpy[1], rpy[2],
                 message.empty() ? "" : "\n", message.c_str());
             (void)n;
@@ -578,13 +763,23 @@ int main(int argc, char** argv) {
                     status += "\n";
                 }
             }
+            if (o.print_features) {
+                status += "\nlatent (what goes on the wire):\n";
+                char cell[16];
+                for (size_t k = 0; k < features.size(); ++k) {
+                    std::snprintf(cell, sizeof(cell), "% 6.3f ", features[k]);
+                    status += cell;
+                    if ((k + 1) % 8 == 0) status += "\n";
+                }
+                if (features.size() % 8) status += "\n";
+            }
             status += "\nkeys: q quit  r reload  n next scene  p preview  s save PGM\n";
 
             if (show_preview) {
                 preview.draw(cam, buf, status);
             } else {
-                std::printf("\r%.2f Hz  render %.3f ms  pose %s  tx %llu    ",
-                            o.rate_hz, render_ms, stale ? "STALE" : "ok",
+                std::printf("\r%.2f Hz  render %.3f ms%s  pose %s  tx %llu    ",
+                            o.rate_hz, render_ms, enc, stale ? "STALE" : "ok",
                             static_cast<unsigned long long>(tx.sent()));
                 std::fflush(stdout);
             }
@@ -599,4 +794,16 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(rx.packets_seen()),
                 static_cast<unsigned long long>(tx.sent()));
     return 0;
+}
+
+int main(int argc, char** argv) {
+    // Socket setup throws — a port already in use, an unresolvable --out-host, a
+    // bad --pose-forward address. Report those the way every other CLI failure is
+    // reported instead of letting them reach std::terminate.
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "depth_hitl: %s\n", e.what());
+        return 1;
+    }
 }

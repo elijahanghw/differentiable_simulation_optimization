@@ -3,13 +3,14 @@
 // One datagram per frame, native little-endian (both ends are LE):
 //
 //   off  0  char[4]  magic "DPTH"
-//   off  4  uint16   version = 1
+//   off  4  uint16   version = 2
 //   off  6  uint16   flags       bit0: pose is stale / never received
 //   off  8  uint32   seq         frame counter, starts at 0
-//   off 12  uint16   payload     0 = pooled float32 (CNN input), 1 = raw uint16 mm
-//   off 14  uint16   reserved
-//   off 16  uint16   rows
-//   off 18  uint16   cols
+//   off 12  uint16   payload     0 = pooled float32, 1 = raw uint16 mm,
+//                                2 = CNN features float32
+//   off 14  uint16   encode_us   CNN cost, 0 when the frame carries no features
+//   off 16  uint16   rows        1 for a feature vector
+//   off 18  uint16   cols        feature width for a feature vector
 //   off 20  uint32   payload_bytes
 //   off 24  uint64   send_time_us    CLOCK_REALTIME on the ground station
 //   off 32  uint64   pose_time_us    mocap timestamp this frame was rendered from
@@ -19,6 +20,10 @@
 //   off 60  float×4  camera quaternion used [qw,qx,qy,qz]
 //   off 76  payload
 //
+// Version 2 only names the uint16 at offset 14, which version 1 always wrote as
+// zero, and adds payload type 2. The layout is unchanged, so a v1 decoder reads a
+// v2 pooled or raw frame correctly.
+//
 // Decoder: hitl/tools/recv_depth.py.
 #pragma once
 
@@ -27,12 +32,13 @@
 #include <string>
 #include <vector>
 
-constexpr uint16_t kDepthProtoVersion = 1;
+constexpr uint16_t kDepthProtoVersion = 2;
 constexpr size_t   kDepthHeaderBytes  = 76;
 
 enum DepthPayload : uint16_t {
-    PAYLOAD_POOLED_F32 = 0,
-    PAYLOAD_RAW_U16_MM = 1,
+    PAYLOAD_POOLED_F32   = 0,
+    PAYLOAD_RAW_U16_MM   = 1,
+    PAYLOAD_FEATURES_F32 = 2,
 };
 
 enum DepthFlags : uint16_t {
@@ -42,6 +48,7 @@ enum DepthFlags : uint16_t {
 struct FrameMeta {
     uint32_t seq          = 0;
     uint16_t flags        = 0;
+    uint16_t encode_us    = 0;   // CNN cost; 0 on frames that carry no features
     uint64_t pose_time_us = 0;
     uint32_t pose_age_us  = 0;
     uint32_t render_us    = 0;
@@ -61,6 +68,8 @@ public:
     bool send_pooled(const FrameMeta& meta, const float* data, int rows, int cols);
     // Full-resolution depth in millimetres, for logging / visualisation.
     bool send_raw_mm(const FrameMeta& meta, const float* metres, int rows, int cols);
+    // CNN latent — what the split deployment actually puts on the wire.
+    bool send_features(const FrameMeta& meta, const float* feat, int dim);
 
     uint64_t sent()   const { return sent_; }
     uint64_t errors() const { return errors_; }

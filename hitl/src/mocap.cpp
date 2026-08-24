@@ -72,7 +72,33 @@ MocapReceiver::MocapReceiver(const std::string& bind_addr, uint16_t port, int rb
 }
 
 MocapReceiver::~MocapReceiver() {
-    if (fd_ >= 0) close(fd_);
+    if (fd_ >= 0)     close(fd_);
+    if (fwd_fd_ >= 0) close(fwd_fd_);
+}
+
+void MocapReceiver::forward_to(const std::string& host, uint16_t port) {
+    fwd_dest_             = sockaddr_in{};
+    fwd_dest_.sin_family  = AF_INET;
+    fwd_dest_.sin_port    = htons(port);
+    if (inet_pton(AF_INET, host.c_str(), &fwd_dest_.sin_addr) != 1)
+        throw std::runtime_error("mocap: --pose-forward needs a dotted-quad IPv4 address, "
+                                 "got '" + host + "'");
+
+    fwd_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fwd_fd_ < 0)
+        throw std::runtime_error(std::string("mocap: forward socket: ") + std::strerror(errno));
+
+    // The companion computer may be reached over a broadcast address on a small
+    // flight-room subnet, same as the inbound stream.
+    int one = 1;
+    setsockopt(fwd_fd_, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+}
+
+int MocapReceiver::wait(int timeout_ms) {
+    if (timeout_ms < 0) timeout_ms = 0;
+    pollfd pfd{fd_, POLLIN, 0};
+    int r = poll(&pfd, 1, timeout_ms);
+    return (r > 0 && (pfd.revents & POLLIN)) ? 1 : 0;
 }
 
 int MocapReceiver::drain(Pose& latest) {
@@ -125,6 +151,15 @@ int MocapReceiver::drain(Pose& latest) {
                 p.vel[i]   = read_le<float>(buf + der + 8  + 4*i);
                 p.omega[i] = read_le<float>(buf + der + 20 + 4*i);
             }
+        }
+
+        // Relay before keeping: every accepted packet goes on, not just the one
+        // this tick renders from, so the companion computer sees the full mocap
+        // rate. Sent verbatim — the receiver gets the mocap client's own bytes.
+        if (fwd_fd_ >= 0) {
+            ssize_t sent = sendto(fwd_fd_, buf, static_cast<size_t>(n), 0,
+                                  reinterpret_cast<sockaddr*>(&fwd_dest_), sizeof(fwd_dest_));
+            if (sent == n) ++forwarded_; else ++fwd_errors_;
         }
 
         p.recv_us = mono_us();

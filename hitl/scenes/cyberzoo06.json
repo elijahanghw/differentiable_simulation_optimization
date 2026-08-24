@@ -1,9 +1,9 @@
 {
  "format": "jads-hitl-scene",
  "version": 1,
- "name": "room06",
+ "name": "cyberzoo06",
  "source": {
-  "config": "hitl/configs/room.yaml (base configs/train/navigate_real.yaml)",
+  "config": "hitl/configs/cyberzoo.yaml (base configs/train/navigate_real.yaml)",
   "seed": 6,
   "mode": "static",
   "bake_region": null,
