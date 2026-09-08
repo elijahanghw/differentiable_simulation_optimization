@@ -7,13 +7,26 @@ from ..depth_render.primitives import point_plane_dist
 
 
 class HoverReal:
-    # state: [pos(3), vel(3), quat(4), omega(3), W(4)] = 17
-    # obs:   [pos - target(3), vel(3), euler(3), omega(3), W(4)] = 16
+    # state: [pos(3), vel(3), quat(4), omega(3), W(n)] = 13 + n
+    # obs:   [pos - target(3), vel(3), euler(3), omega(3), W(n)] = 12 + n
+    #
+    # n is the motor count, read off the drone yaml in __init__ (one moment
+    # coefficient per motor), so a quad and a hex both fly on this code. The
+    # values below are the four-motor defaults, overwritten once `drone` is
+    # parsed — read them from the instance, never from the class.
     obs_dim: int = 16
     act_dim: int = 4
+    drone_state_dim: int = 17  # 13 + act_dim
     dt: float = 0.01
 
     integrator: str = "rk4"
+
+    b1: float = 1.0
+    b2: float = 32.0
+
+    # ---- Maximum Velocity ---------------------------------------------    
+    max_velocity:      float = 2.0
+    max_vel_weight:    float = 5.0
 
     # Drone parameters: the parsed configs/drone/*.yaml dict (train.py resolves
     # the path ref). `dr` overrides its domain_randomization.dr when set.
@@ -58,10 +71,24 @@ class HoverReal:
         if self.dr is None:
             self.dr = float(self.drone.get("domain_randomization", {}).get("dr", 0.0))
 
+        # The motor count is a property of the airframe, so it is derived from
+        # the drone config rather than configured separately. A config that
+        # states one of these explicitly must agree with the yaml it points at.
         n_motors = int(self.nominal_params.k_p.shape[0])
-        if n_motors != self.act_dim:
+        for name, derived in (("act_dim",         n_motors),
+                              ("obs_dim",         12 + n_motors),
+                              ("drone_state_dim", 13 + n_motors)):
+            if name in kwargs and int(kwargs[name]) != derived:
+                raise ValueError(
+                    f"drone params describe {n_motors} motors, which implies "
+                    f"{name}={derived}, but the config sets {name}={kwargs[name]}")
+            setattr(self, name, derived)
+
+        geom = self.geometry or {}
+        if "motor_positions" in geom and len(geom["motor_positions"]) != n_motors:
             raise ValueError(
-                f"drone params describe {n_motors} motors but act_dim={self.act_dim}")
+                f"geometry.motor_positions has {len(geom['motor_positions'])} rows "
+                f"but drone params describe {n_motors} motors")
 
     def reset(self, key: jax.Array) -> tuple:
         """
@@ -73,8 +100,8 @@ class HoverReal:
         duration. See JADS/drone_physics/randomization.py.
 
         Returns:
-            obs:   observation vector, shape (obs_dim,)  [pos-target, vel, euler, omega, W]
-            state: state array, shape (17,)              [pos, vel, quat, omega, W]
+            obs:   observation vector, shape (obs_dim,)        [pos-target, vel, euler, omega, W]
+            state: state array, shape (drone_state_dim,)       [pos, vel, quat, omega, W]
             info:  {"params": DroneParams}
         """
         (k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11, k12, k13,
@@ -138,18 +165,8 @@ class HoverReal:
         return jnp.concatenate([pos, vel, euler, omega, W])
 
     def _signed_dist(self, state: jnp.ndarray) -> jnp.ndarray:
-        """Signed distance to the nearest bound; negative means crashed.
-
-        Mirrors navigate's `_get_nearest_obstacle_dist` contract on a scene with
-        no geometry. Two bounds: the ground plane, and a sphere of radius
-        `max_dist` around the target that stands in for navigate's arena. The
-        second one matters under a persistent carry — without it a diverged
-        element keeps flying for the whole `max_episode_len` and its (unbounded,
-        quadratic) position error dominates the batch loss.
-        """
         pos    = state[0:3]
         target = jnp.array([self.target_x, self.target_y, self.target_z])
-        # NED: the ground's outward normal points up, i.e. along -z.
         ground = point_plane_dist(pos,
                                   jnp.array([0.0, 0.0, self.ground_z]),
                                   jnp.array([0.0, 0.0, -1.0]))
@@ -182,9 +199,6 @@ class HoverReal:
             "omega":  next_state[10:13],
             "action": U,
             "dist":   dist,
-            # Collision flag for per-element resets in persistent-carry BPTT.
-            # stop_gradient'd so it only gates the reset select and never leaks
-            # a gradient, matching navigate.
             "crashed": jax.lax.stop_gradient(dist < 0.0),
         }
         return next_state, self._get_obs(next_state), step_data
@@ -199,13 +213,16 @@ class HoverReal:
         pos   = traj["pos"]    # (B, T, 3)
         vel   = traj["vel"]    # (B, T, 3)
         omega = traj["omega"]  # (B, T, 3)
-        U     = traj["action"] # (B, T, 6)
+        U     = traj["action"] # (B, T, act_dim)
         target = jnp.array([self.target_x, self.target_y, self.target_z])
+
+        loss_max_vel = jnp.mean(self.b1 * jax.nn.softplus(self.b2 * (vel - self.max_velocity)))
 
         per_step = -(
             jnp.sum((pos - target)** 2, axis=-1)
             + 0.1  * jnp.sum(vel   ** 2, axis=-1)
             + 0.01 * jnp.sum(omega ** 2, axis=-1)
+            + self.max_vel_weight*loss_max_vel 
             + 0.05 * jnp.sum(((U + 1.0) / 2.0) ** 2, axis=-1)
         )  # (B, T)
         mean_return = jnp.mean(per_step)

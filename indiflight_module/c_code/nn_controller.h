@@ -7,6 +7,11 @@
 // Include the neural network code
 #include "neural_network.h"
 
+// Motor count of the trained airframe, and the world_state length it
+// implies (12 rigid-body entries + one motor speed per motor).
+#define NN_NUM_MOTORS       6
+#define NN_WORLD_STATE_DIM  18
+
 #define NUM_TARGETS   1
 #define TARGET_RADIUS 0.3f   // advance to the next waypoint inside this radius (m)
 #define TARGET_LOOP   0    // 1: wrap to the first waypoint, 0: hold the last
@@ -23,6 +28,6 @@ extern uint8_t target_index;
 void nn_reset(void);
 
 // One control step, at the training rate (100 Hz).
-void nn_control(const float world_state[16], float motor_cmds[4]);
+void nn_control(const float world_state[NN_WORLD_STATE_DIM], float motor_cmds[NN_NUM_MOTORS]);
 
 #endif

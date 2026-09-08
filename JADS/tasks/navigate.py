@@ -490,7 +490,7 @@ class Navigate:
             (self.b1 * jax.nn.softplus(self.b2 * (-dist[:, 1:]))) * v_to_pt
         )
         loss_obj = jnp.mean(
-            (jax.nn.relu(1.0 - dist[:, 1:]) ** 2) * v_to_pt
+            (jax.nn.relu(0.5 - dist[:, 1:]) ** 2) * v_to_pt
         )
 
         total = (self.xy_weight*loss_xy + self.z_weight*loss_z
@@ -599,7 +599,7 @@ class Navigate:
 
         v_to_pt = jnp.clip(-(dist - prev_dist) / self.dt, 1.0, None)
         loss_collision = self.b1 * jax.nn.softplus(self.b2 * (-dist)) * v_to_pt
-        loss_obj       = jax.nn.relu(1.0 - dist) ** 2 * v_to_pt
+        loss_obj       = jax.nn.relu(0.5 - dist) ** 2 * v_to_pt
 
         total = (self.xy_weight*loss_xy + self.z_weight*loss_z
                  + self.vel_weight*loss_vel + self.rate_weight*loss_rate

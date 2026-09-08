@@ -14,22 +14,25 @@ import argparse
 import random
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import rerun as rr
-import yaml
 
 from JADS.tasks import make_env
 from JADS.drone_physics.quat_math import quat_to_rotmat, quat_to_euler
-from JADS.drone_physics.morphology import PROP_DIAMETER, MOUNT_RADIUS
+from JADS.drone_physics.morphology import PROP_DIAMETER, MOUNT_RADIUS, MAX_RPM
 from JADS.models import make_model
 from JADS.utils.checkpoint import load as load_checkpoint
+from JADS.utils.config import load_config
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config",     required=True)
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--steps",      type=int, default=None)
+    p.add_argument("--steps",      type=int, default=None,
+                   help="rollout length; defaults to the config's episode length "
+                        "(training.max_episode_len under persistent carry, else horizon)")
     p.add_argument("--seed",       type=int, default=None)
     p.add_argument("--output",     type=str, default="rollout.rrd")
     return p.parse_args()
@@ -96,25 +99,44 @@ def _build_drone_geometry(l, psi, theta, phi, alpha, mount_radius=MOUNT_RADIUS):
     return prop_pos_body, mount_points, disc_offsets, thrust_body  # (6,3), (6,3), (6,n_pts,3), (6,3)
 
 
-def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_body, dt):
+def _build_fixed_geometry(geom):
+    """Same 4-tuple contract as _build_drone_geometry, for a fixed airframe.
+
+    Used when the env carries a `geometry` block from its drone yaml (hover_real)
+    rather than deriving its layout from morphology parameters. Motor positions
+    are listed explicitly, so this handles any motor count and makes no symmetry
+    assumption. Thrust is along -body-z (up in FRD) for every motor.
+    """
+    prop_pos_body = np.asarray(geom["motor_positions"], dtype=float)   # (n, 3)
+    n             = prop_pos_body.shape[0]
+    mount_points  = np.zeros_like(prop_pos_body)   # arms are drawn from the CoM
+    thrust_body   = np.tile(np.array([0.0, 0.0, -1.0]), (n, 1))
+    radius        = float(geom.get("prop_diameter", PROP_DIAMETER)) / 2.0
+    disc_offsets  = np.stack([_disc_points(thrust_body[i], radius) for i in range(n)])
+    return prop_pos_body, mount_points, disc_offsets, thrust_body
+
+
+def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_body, dt,
+               body_radius=0.05, body_height=0.05, w_full_scale=None):
     rr.set_time("time", duration=t * dt)
 
     pos  = state[0:3]
     quat = state[6:10]
     R    = np.array(quat_to_rotmat(quat))
+    n    = prop_pos_body.shape[0]   # 6 for the morphology drone, 4 for a quad
 
-    prop_world  = pos + (R @ prop_pos_body.T).T    # (6, 3)
-    mount_world = pos + (R @ mount_points_body.T).T  # (6, 3)
+    prop_world  = pos + (R @ prop_pos_body.T).T    # (n, 3)
+    mount_world = pos + (R @ mount_points_body.T).T  # (n, 3)
 
     rr.log("drone/arms", rr.LineStrips3D(
-        [np.stack([mount_world[i], prop_world[i]]) for i in range(6)],
+        [np.stack([mount_world[i], prop_world[i]]) for i in range(n)],
         colors=[[80, 80, 220]], radii=0.004,
     ))
     body_z_world = R[:, 2]
     rr.log("drone/body", rr.Cylinders3D(
         centers=[pos],
-        lengths=[0.05],
-        radii=[0.05],
+        lengths=[body_height],
+        radii=[body_radius],
         quaternions=_quat_z_to_axis([body_z_world]),
         colors=[[220, 80, 80, 200]],
         fill_mode="solid",
@@ -125,9 +147,9 @@ def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_
             prop_world[i] + (R @ disc_offsets[i].T).T,
             prop_world[i] + disc_offsets[i, :1] @ R.T,
         ], axis=0)
-        for i in range(6)
+        for i in range(n)
     ], colors=[[80, 220, 80]], radii=0.003))
-    thrust_world = (R @ thrust_body.T).T  # (6, 3) — unit thrust vectors in world frame
+    thrust_world = (R @ thrust_body.T).T  # (n, 3) — unit thrust vectors in world frame
     rr.log("drone/thrust", rr.Arrows3D(
         origins=prop_world,
         vectors=thrust_world * 0.08,
@@ -143,6 +165,16 @@ def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_
         ("wx", state[10]), ("wy",    state[11]), ("wz",   state[12]),
     ]:
         rr.log(f"state/{name}", rr.Scalars(float(val)))
+
+    # Motor speeds. Both dynamics modules store w in state[13:13+n] normalized to
+    # [-1, 1]; the physical speed is (w+1)/2 * w_full_scale rad/s, and one
+    # rev/min is 2π/60 rad/s. `w_full_scale` is named MAX_RPM on the morphology
+    # drone and W_MAX_N on an identified one, but both are rad/s despite the name.
+    if w_full_scale is not None:
+        w   = state[13:13 + n]
+        rpm = (w + 1.0) / 2.0 * w_full_scale * 60.0 / (2.0 * np.pi)
+        for i in range(n):
+            rr.log(f"motor/rpm_{i}", rr.Scalars(float(rpm[i])))
 
 
 # ---------------------------------------------------------------------------
@@ -425,9 +457,35 @@ def run_rollout(env, policy, policy_params, morph_params, key, steps):
     has_vis_depth = hasattr(env, "get_vis_depth")
     frame_skip    = getattr(env, "frame_skip", 1)
 
+    # step()'s third argument is `morph_params` on a morphology env and `params`
+    # (the airframe) on a *_real one — never both, and they are not
+    # interchangeable, so pass it by name.
+    # `init_morph` is the same marker bptt.py uses to detect a morphology env.
+    step_kw = {"morph_params": morph_params} if hasattr(env, "init_morph") else {}
+
+    # Eager dispatch costs seconds per step on a depth env — the raymarcher is
+    # thousands of small ops, and a scene with spheres/boxes/capsules runs every
+    # intersector per ray. Jitting these three calls turns ~2.7 s/step into a
+    # single ~2.5 s compile followed by sub-millisecond steps.
+    if has_depth:
+        # step_idx goes in as a traced array rather than a Python int, so the
+        # async-render branch in _get_obs does not retrigger a compile each step.
+        env_step = jax.jit(lambda s, a, i, d: env.step(s, a, step_idx=i, prev_depth=d, **step_kw))
+    else:
+        env_step = jax.jit(lambda s, a: env.step(s, a, **step_kw))
+
+    if has_hidden and has_depth:
+        act_fn = jax.jit(lambda p, d, o, h: policy.apply({"params": p}, d, o, h))
+    elif has_hidden:
+        act_fn = jax.jit(lambda p, o, h: policy.apply({"params": p}, o, h))
+    else:
+        act_fn = jax.jit(lambda p, o: policy.apply({"params": p}, o))
+
+    vis_depth_fn = jax.jit(env.get_vis_depth) if has_vis_depth else None
+
     obs, state, _ = env.reset(key)
     states     = [np.array(state)]
-    last_vis_depth = np.array(env.get_vis_depth(state)) if has_vis_depth else None
+    last_vis_depth = np.array(vis_depth_fn(state)) if has_vis_depth else None
     vis_depths = [last_vis_depth] if has_vis_depth else None
 
     hidden = policy.init_hidden() if has_hidden else None
@@ -436,20 +494,20 @@ def run_rollout(env, policy, policy_params, morph_params, key, steps):
         if has_hidden:
             if has_depth:
                 depth_img, obs_vec = obs
-                action, hidden = policy.apply({"params": policy_params}, depth_img, obs_vec, hidden)
+                action, hidden = act_fn(policy_params, depth_img, obs_vec, hidden)
             else:
-                action, hidden = policy.apply({"params": policy_params}, obs, hidden)
+                action, hidden = act_fn(policy_params, obs, hidden)
         else:
-            action = policy.apply({"params": policy_params}, obs)
+            action = act_fn(policy_params, obs)
 
         if has_depth:
-            state, obs, _ = env.step(state, action, morph_params, step_idx=t, prev_depth=depth_img)
+            state, obs, _ = env_step(state, action, jnp.int32(t), depth_img)
         else:
-            state, obs, _ = env.step(state, action, morph_params)
+            state, obs, _ = env_step(state, action)
         states.append(np.array(state))
         if has_vis_depth:
             if (t + 1) % frame_skip == 0:
-                last_vis_depth = np.array(env.get_vis_depth(state))
+                last_vis_depth = np.array(vis_depth_fn(state))
             vis_depths.append(last_vis_depth)
 
     return np.stack(states), vis_depths
@@ -459,11 +517,29 @@ def run_rollout(env, policy, policy_params, morph_params, key, steps):
 # Main
 # ---------------------------------------------------------------------------
 
+def _default_steps(tcfg):
+    """How many steps one episode actually lasts under this training config.
+
+    `horizon` is only the truncation window — how many steps one gradient update
+    covers. When the rollout carry threads across updates, an element is reset at
+    `age >= max_episode_len`, so the episode the policy was trained to fly is
+    `max_episode_len` steps long and visualizing only `horizon` shows a fraction
+    of it.
+
+    Whether the carry threads depends on the algorithm: bptt.py gates
+    max_episode_len behind `persistent_carry`, while ppo.py is always
+    persistent-carry and reads the cap unconditionally. Falls back to `horizon`
+    when the cap is 0 (= unbounded), where there is no natural length to pick.
+    """
+    cap = tcfg.get("max_episode_len", 0)
+    carries = tcfg.get("algo", "bptt").lower() == "ppo" or tcfg.get("persistent_carry", False)
+    return cap if (carries and cap > 0) else tcfg["horizon"]
+
+
 def main():
     args = parse_args()
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     ecfg       = config["env"]
     env_kwargs = {k: v for k, v in ecfg.items() if k != "name"}
@@ -480,40 +556,70 @@ def main():
         for k, v in env.get_morph_info(morph_params).items():
             print(f"  {k} = {v:.4f}")
 
-    if morph_params is not None and hasattr(env, "get_l"):
-        l     = np.array(env.get_l(morph_params))
-        psi   = np.array(env.get_psi(morph_params))
-        theta = np.array(env.get_theta(morph_params))
-        phi   = np.array(env.get_phi(morph_params))
-        alpha = np.array(env.get_alpha(morph_params))
+    # A fixed airframe (hover_real) carries its layout in the drone yaml and has
+    # no morphology parameters at all, so the morphology branch below must not
+    # even be reached — its `*_default` attributes do not exist on such an env.
+    geom = getattr(env, "geometry", None)
+    if geom is not None:
+        drone_geometry = _build_fixed_geometry(geom)
+        body_radius    = float(geom.get("body_radius", 0.05))
+        body_height    = float(geom.get("body_height", 0.05))
     else:
-        l     = np.full(3, env.l_default)
-        psi   = np.full(3, env.psi_default)
-        theta = np.full(3, env.theta_default)
-        phi   = (
-            np.array([env.phi_default, -env.phi_default, env.phi_default])
-            if env.alternating_phi else np.full(3, env.phi_default)
-        )
-        alpha = np.full(3, env.alpha_default)
+        body_radius = body_height = 0.05
+        if morph_params is not None and hasattr(env, "get_l"):
+            l     = np.array(env.get_l(morph_params))
+            psi   = np.array(env.get_psi(morph_params))
+            theta = np.array(env.get_theta(morph_params))
+            phi   = np.array(env.get_phi(morph_params))
+            alpha = np.array(env.get_alpha(morph_params))
+        else:
+            l     = np.full(3, env.l_default)
+            psi   = np.full(3, env.psi_default)
+            theta = np.full(3, env.theta_default)
+            phi   = (
+                np.array([env.phi_default, -env.phi_default, env.phi_default])
+                if env.alternating_phi else np.full(3, env.phi_default)
+            )
+            alpha = np.full(3, env.alpha_default)
+        drone_geometry = _build_drone_geometry(l, psi, theta, phi, alpha)
 
-    steps = args.steps if args.steps is not None else config["training"]["horizon"]
+    # Full-scale motor speed (rad/s) used to un-normalize state[13:] for the RPM
+    # plots. An identified airframe carries it as W_MAX_N in its drone params;
+    # the morphology drone has no params object and uses the MAX_RPM constant.
+    w_full_scale = float(getattr(getattr(env, "nominal_params", None), "W_MAX_N", MAX_RPM))
+
+    steps = args.steps if args.steps is not None else _default_steps(config["training"])
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**31)
-    print(f"Seed: {seed}")
+    print(f"Seed: {seed}  |  steps: {steps}")
     key = jax.random.PRNGKey(seed)
     print("Running rollout…")
     states, vis_depths = run_rollout(env, policy, policy_params, morph_params, key, steps)
     print(f"  {len(states)} steps collected")
 
-    prop_pos_body, mount_points_body, disc_offsets, thrust_body = _build_drone_geometry(l, psi, theta, phi, alpha)
+    prop_pos_body, mount_points_body, disc_offsets, thrust_body = drone_geometry
 
     rr.init(f"{ecfg['name']}_rollout")
     rr.log("/", rr.ViewCoordinates.FRD, static=True)
 
+    # Navigate carries a per-episode target in the state; hover_real has a fixed
+    # one on the env. Either way the marker is the same.
+    fixed_target = (
+        np.array([env.target_x, env.target_y, env.target_z])
+        if all(hasattr(env, a) for a in ("target_x", "target_y", "target_z")) else None
+    )
+    # Where the target/scene sit in the state array: right after the drone block,
+    # which is 19 floats on the six-motor morphology drone and 17 on the
+    # four-motor identified one (navigate_real).
+    nd = getattr(env, "drone_state_dim", 19)
     if hasattr(env, "scene_cfg"):
-        _log_scene(env.scene_cfg, states[0][22:], traj_positions=states[:, 0:3])
+        _log_scene(env.scene_cfg, states[0][nd + 3:], traj_positions=states[:, 0:3])
         rr.log("world/target", rr.Points3D(
-            [states[0][19:22]], colors=[[255, 215, 0]], radii=0.15,
+            [states[0][nd:nd + 3]], colors=[[255, 215, 0]], radii=0.15,
+        ), static=True)
+    elif fixed_target is not None:
+        rr.log("world/target", rr.Points3D(
+            [fixed_target], colors=[[255, 215, 0]], radii=0.15,
         ), static=True)
 
     rr.set_time("time", duration=len(states) * env.dt)
@@ -523,7 +629,8 @@ def main():
 
     print("Logging to Rerun…")
     for t, state in enumerate(states):
-        _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_body, env.dt)
+        _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_body, env.dt,
+                   body_radius=body_radius, body_height=body_height, w_full_scale=w_full_scale)
 
         if vis_depths is not None:
             rr.set_time("time", duration=t * env.dt)
@@ -534,7 +641,12 @@ def main():
         if hasattr(env, "scene_cfg"):
             rr.set_time("time", duration=t * env.dt)
             rr.log("state/dist_to_target", rr.Scalars(
-                float(np.linalg.norm(state[0:3] - state[19:22]))
+                float(np.linalg.norm(state[0:3] - state[nd:nd + 3]))
+            ))
+        elif fixed_target is not None:
+            rr.set_time("time", duration=t * env.dt)
+            rr.log("state/dist_to_target", rr.Scalars(
+                float(np.linalg.norm(state[0:3] - fixed_target))
             ))
 
     rr.save(args.output)

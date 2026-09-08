@@ -1,13 +1,3 @@
-"""
-config.py — YAML config loading shared by the training and evaluation entry
-points (train.py, rerun_rollout.py, eval_success_rate.py).
-
-The one thing this adds over a plain yaml.safe_load is path-ref resolution:
-`env.scene` and `env.drone` may be written as paths, and are replaced by the
-parsed contents of the file they point at. Keeping this in one place matters
-because an entry point that skips it hands the env a *string* where it expects
-a dict, which fails deep inside the env constructor rather than at load time.
-"""
 from pathlib import Path
 from typing import Any, Dict
 

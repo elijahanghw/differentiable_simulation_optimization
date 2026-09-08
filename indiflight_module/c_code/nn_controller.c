@@ -7,11 +7,11 @@
 //   world_state[3:6]   velocity      NED, m/s, world frame
 //   world_state[6:9]   roll, pitch, yaw   rad
 //   world_state[9:12]  body rates    rad/s
-//   world_state[12:16] motor speeds  rad/s (see MOTOR_OMEGA_SCALE)
+//   world_state[12:18] motor speeds  rad/s, 6 motors (see MOTOR_OMEGA_SCALE)
 // ---------------------------------------------------------------------
 
-#define W_MAX_N     5000.0f   // motor speed mapping to obs = +1 (rad/s)
-// Set to (2*M_PI/60) if world_state[12:16] arrives in RPM instead of rad/s.
+#define W_MAX_N     4000.0f   // motor speed mapping to obs = +1 (rad/s)
+// Set to (2*M_PI/60) if world_state[12:18] arrives in RPM instead of rad/s.
 #define MOTOR_OMEGA_SCALE 1.0f
 // Yaw of the training world frame +x axis expressed in the estimator frame.
 // Nonzero if the EKF heading origin is not the training origin.
@@ -20,7 +20,7 @@
 // motor_order[i] is the indiflight motor carrying training motor i.
 // The identified coefficients are per-motor and asymmetric, so a wrong
 // order flies badly rather than obviously. Check against the mixer.
-static const uint8_t motor_order[4] = {0, 1, 2, 3};
+static const uint8_t motor_order[NN_NUM_MOTORS] = {0, 1, 2, 3, 4, 5};
 
 const float target_pos[NUM_TARGETS][3] = {
     {3.0f, 0.0f, -1.5f},
@@ -29,7 +29,7 @@ const float target_pos[NUM_TARGETS][3] = {
 // Expected arming pose in the training world frame. Not used by
 // nn_control(); exported for the indiflight side to position/check against.
 const float start_pos[3] = {
-    -3.0f, 0.0f, -1.5f
+    -2.5f, 0.0f, -1.5f
 };
 
 const float start_yaw = 0.0f;
@@ -42,7 +42,7 @@ void nn_reset(void) {
     nn_reset_hidden(nn_hidden);
 }
 
-void nn_control(const float world_state[16], float motor_cmds[4]) {
+void nn_control(const float world_state[NN_WORLD_STATE_DIM], float motor_cmds[NN_NUM_MOTORS]) {
     // Advance the waypoint once we are inside the capture radius.
     float dx = world_state[0] - target_pos[target_index][0];
     float dy = world_state[1] - target_pos[target_index][1];
@@ -79,7 +79,7 @@ void nn_control(const float world_state[16], float motor_cmds[4]) {
     obs[10] = world_state[10];
     obs[11] = world_state[11];
     // motor speeds scaled to [-1, 1]: w = 2 * W / W_MAX_N - 1
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < NN_NUM_MOTORS; ++i) {
         float W = world_state[12 + motor_order[i]] * MOTOR_OMEGA_SCALE;
         obs[12 + i] = 2.0f * W / W_MAX_N - 1.0f;
     }
@@ -88,7 +88,7 @@ void nn_control(const float world_state[16], float motor_cmds[4]) {
     float action[NN_ACT_DIM];
     nn_forward(obs, nn_hidden, action);
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < NN_NUM_MOTORS; ++i) {
         // clip to [-1, 1.0] (1.0 MOTOR LIMIT), then map [-1,1] -> [0,1]
         float a = action[i];
         if (a > 1.0f) { a = 1.0f; }

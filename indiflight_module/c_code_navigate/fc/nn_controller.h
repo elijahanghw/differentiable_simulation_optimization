@@ -11,7 +11,7 @@
 #define TARGET_LOOP   0    // 1: wrap to the first waypoint, 0: hold the last
 
 // Control steps the FC will fly on a held feature vector before saying so.
-#define NN_FEATURE_MAX_AGE 30   // 3 camera frames at 10 Hz
+#define NN_FEATURE_MAX_AGE 15   // 3 camera frames at 20 Hz
 
 #define NN_STATUS_OK           0
 #define NN_STATUS_STALE        1   // flying on a held vector, older than the cap

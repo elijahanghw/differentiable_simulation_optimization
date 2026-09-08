@@ -26,6 +26,7 @@ import yaml
 from tasks import make_env
 from models import make_model
 from utils.checkpoint import load as load_checkpoint
+from utils.config import load_config
 
 
 def parse_args():
@@ -142,8 +143,7 @@ def build_eval_fn(env, policy, max_steps, success_radius):
 def main():
     args = parse_args()
 
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
+    config = load_config(args.config)
 
     ecfg = config["env"]
     dcfg = config.get("depth_camera", {})

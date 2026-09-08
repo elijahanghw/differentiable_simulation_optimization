@@ -5,6 +5,8 @@ __pycache__/
 
 # Notebooks
 *.ipynb
+# ...except the C export notebooks, which are the deployment path
+!indiflight_module/*.ipynb
 
 # Checkpoints
 checkpoints/

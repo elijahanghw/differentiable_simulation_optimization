@@ -19,10 +19,11 @@ class NavigateReal:
     """
     Navigate's task and loss, flown on the identified drone model.
 
-    State layout (flat float32 array of length state_dim):
-        [0:17]         drone state  (pos, vel, quat, omega, W)
-        [17:20]        target pos
-        [20:]          scene array  (SceneConfig.sample — see scene.py)
+    State layout (flat float32 array of length state_dim), with nd =
+    drone_state_dim = 13 + n_motors:
+        [0:nd]         drone state  (pos, vel, quat, omega, W)
+        [nd:nd+3]      target pos
+        [nd+3:]        scene array  (SceneConfig.sample — see scene.py)
                          static mode:     full obstacle geometry  (scene_dim floats)
                          procedural mode: single float32 episode seed  (1 float)
 
@@ -35,8 +36,13 @@ class NavigateReal:
     """
 
     # ---- Drone --------------------------------------------------------
-    # drone state: [pos(3), vel(3), quat(4), omega(3), W(4)] = 17
-    # obs:         [pos - target(3), vel(3), euler(3), omega(3), W(4)] = 16
+    # drone state: [pos(3), vel(3), quat(4), omega(3), W(n)] = 13 + n
+    # obs:         [pos - target(3), vel(3), euler(3), omega(3), W(n)] = 12 + n
+    #
+    # n is the motor count, read off the drone yaml in __init__ (one moment
+    # coefficient per motor), so a quad and a hex both fly on this code. The
+    # values below are the four-motor defaults, overwritten once `drone` is
+    # parsed — read them from the instance, never from the class.
     obs_dim: int = 16
     critic_obs_dim: int = 20   # privileged critic input — see critic_obs()
     act_dim: int = 4
@@ -122,13 +128,20 @@ class NavigateReal:
         if self.dr is None:
             self.dr = float(self.drone.get("domain_randomization", {}).get("dr", 0.0))
 
-        # The state slices below are written out (17 / 20), so a mismatched motor
-        # count would mis-index silently instead of failing. Catch it here.
+        # The motor count is a property of the airframe, so it is derived from
+        # the drone config rather than configured separately — every state slice
+        # below is cut relative to drone_state_dim. A config that states one of
+        # these explicitly must agree with the yaml it points at.
         n_motors = int(self.nominal_params.k_p.shape[0])
-        if n_motors != self.act_dim or self.drone_state_dim != 13 + n_motors:
-            raise ValueError(
-                f"drone params describe {n_motors} motors, but act_dim={self.act_dim} "
-                f"and drone_state_dim={self.drone_state_dim} (expected 13 + n_motors)")
+        for name, derived in (("act_dim",         n_motors),
+                              ("obs_dim",         12 + n_motors),
+                              ("drone_state_dim", 13 + n_motors),
+                              ("critic_obs_dim",  16 + n_motors)):
+            if name in kwargs and int(kwargs[name]) != derived:
+                raise ValueError(
+                    f"drone params describe {n_motors} motors, which implies "
+                    f"{name}={derived}, but the config sets {name}={kwargs[name]}")
+            setattr(self, name, derived)
 
         # Motor spheres, in the body frame. Fixed — there is no morphology to
         # derive them from, so unlike Navigate they are not a step() argument.
@@ -220,7 +233,7 @@ class NavigateReal:
             quat,
             jnp.array([wx, wy, wz]),
             W,
-        ])  # (17,)
+        ])  # (drone_state_dim,)
 
         # ---- Target --------------------------------------------------------
         tkeys = jax.random.split(target_key, 3)
@@ -252,9 +265,10 @@ class NavigateReal:
                 held and returned unchanged (zero-order hold). Leave both
                 None (default) to always render, e.g. on reset().
         """
-        rel_pos = state[0:3] - state[17:20]
+        nd = self.drone_state_dim
+        rel_pos = state[0:3] - state[nd:nd + 3]
         euler = jax.lax.stop_gradient(quat_to_euler(state[6:10]))
-        drone_states = jnp.concatenate([rel_pos, state[3:6], euler, state[10:13], state[13:17]])
+        drone_states = jnp.concatenate([rel_pos, state[3:6], euler, state[10:13], state[13:nd]])
 
         if step_idx is not None and self.frame_skip > 1:
             should_render = (step_idx + 1) % self.frame_skip == 0
@@ -269,12 +283,13 @@ class NavigateReal:
     
     def _unpack_scene(self, state: jnp.ndarray) -> dict:
         """Extract obstacle geometry from state, handling both scene modes."""
+        scene_start = self.drone_state_dim + 3   # drone block, then the target
         if self.scene_cfg.procedural:
             (sphere_centers, sphere_radii,
              box_centers, box_half_extents,
              cap_centers, cap_axes, cap_hh, cap_radii,
              obb_centers, obb_quats, obb_he) = self.scene_cfg.get_local_obstacles(
-                state[0:3], state[20]
+                state[0:3], state[scene_start]
             )
             return jax.lax.stop_gradient({
                 "sphere_centers":    sphere_centers,
@@ -289,7 +304,7 @@ class NavigateReal:
                 "obb_quats":         obb_quats,
                 "obb_half_extents":  obb_he,
             })
-        return self.scene_cfg.unpack(state[20:])
+        return self.scene_cfg.unpack(state[scene_start:])
 
     def _get_depth(self, state: jnp.ndarray, arrays: dict = None) -> jnp.ndarray:
         """
@@ -425,10 +440,11 @@ class NavigateReal:
         if params is None:
             params = self.nominal_params
 
+        nd = self.drone_state_dim
         U = jnp.clip(action, -1.0, 1.0)  # command ∈ [-1, 1], matching W state range
 
         integrators = {"euler": forward_euler, "semi_implicit_euler": semi_implicit_euler, "rk4": rk4}
-        next_drone   = integrators[self.integrator](_gdecay(state[0:17], self._gd_factor), U, params, self.dt)
+        next_drone   = integrators[self.integrator](_gdecay(state[0:nd], self._gd_factor), U, params, self.dt)
 
         # Renormalize quaternion, clip velocities
         quat_norm = jnp.maximum(jnp.linalg.norm(next_drone[6:10]), 1e-8)
@@ -437,10 +453,10 @@ class NavigateReal:
         next_drone = next_drone.at[10:13].set(jnp.clip(next_drone[10:13], -20.0, 20.0))
 
         # Target + scene are frozen; append unchanged
-        next_state = jnp.concatenate([next_drone, state[17:]])
+        next_state = jnp.concatenate([next_drone, state[nd:]])
 
         R_sg            = jax.lax.stop_gradient(quat_to_rotmat(next_drone[6:10]))
-        motor_pos_world = next_drone[0:3] + self.motor_pos_body @ R_sg.T  # (4, 3) world frame
+        motor_pos_world = next_drone[0:3] + self.motor_pos_body @ R_sg.T  # (n_motors, 3) world frame
 
         arrays = self._unpack_scene(next_state)
         dist = self._get_nearest_obstacle_dist(next_state, motor_pos_world, arrays=arrays)
@@ -448,7 +464,7 @@ class NavigateReal:
             "pos":        next_state[0:3],
             "vel":        next_state[3:6],
             "quat":       next_state[6:10],
-            "target_pos": next_state[17:20],
+            "target_pos": next_state[nd:nd + 3],
             "omega":      next_state[10:13],
             "action":     U,
             "dist":       dist,
@@ -545,7 +561,8 @@ class NavigateReal:
         Doubles as the potential for progress shaping in PPO (algos/ppo.py,
         `progress_weight`) and as a training diagnostic.
         """
-        return jnp.linalg.norm(state[0:3] - state[17:20])
+        nd = self.drone_state_dim
+        return jnp.linalg.norm(state[0:3] - state[nd:nd + 3])
 
     def critic_obs(self, state: jnp.ndarray, dist: jnp.ndarray) -> jnp.ndarray:
         """Privileged observation for an asymmetric (feed-forward) critic.
@@ -562,22 +579,23 @@ class NavigateReal:
         critic cannot tell which drone it is flying. That residual variance is
         the price of keeping the signature shared with the other envs.
 
-        Layout (critic_obs_dim = 20):
+        Layout (critic_obs_dim = 16 + n_motors, i.e. 20 for a quad):
             [0:3]   absolute position   (altitude matters — ground plane at z=0)
             [3:6]   target-relative position
             [6:9]   velocity
             [9:12]  attitude (euler)
             [12:15] body rates
-            [15:19] motor speeds
-            [19]    signed distance to the nearest obstacle  (privileged)
+            [15:15+n] motor speeds
+            [15+n]  signed distance to the nearest obstacle  (privileged)
         """
+        nd = self.drone_state_dim
         return jnp.concatenate([
             state[0:3],
-            state[0:3] - state[17:20],
+            state[0:3] - state[nd:nd + 3],
             state[3:6],
             quat_to_euler(state[6:10]),
             state[10:13],
-            state[13:17],
+            state[13:nd],
             jnp.atleast_1d(dist),
         ])
 
@@ -624,7 +642,7 @@ class NavigateReal:
 
         v_to_pt = jnp.clip(-(dist - prev_dist) / self.dt, 1.0, None)
         loss_collision = self.b1 * jax.nn.softplus(self.b2 * (-dist)) * v_to_pt
-        loss_obj       = jax.nn.relu(1.0 - dist) ** 2 * v_to_pt
+        loss_obj       = jax.nn.relu(0.5 - dist) ** 2 * v_to_pt
 
         total = (self.xy_weight*loss_xy + self.z_weight*loss_z
                  + self.vel_weight*loss_vel + self.rate_weight*loss_rate

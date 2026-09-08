@@ -24,8 +24,8 @@
 # capsule_hh_max: 1.20
 
 
-arena_x_min:  2.0
-arena_x_max:  8.0
+arena_x_min:  -3.0
+arena_x_max:  3.0
 arena_y_min: -3.0
 arena_y_max:  3.0
 arena_z_min: -4.0
@@ -36,12 +36,12 @@ n_boxes:    8
 n_capsules: 8
 
 sphere_r_min: 0.20
-sphere_r_max: 0.60
+sphere_r_max: 0.40
 
 box_hx_min: 0.20
-box_hx_max: 0.60
+box_hx_max: 0.40
 box_hy_min: 0.20
-box_hy_max: 0.60
+box_hy_max: 0.40
 box_hz_min: 0.20
 box_hz_max: 0.60
 
