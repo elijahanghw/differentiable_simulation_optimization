@@ -232,9 +232,8 @@ def train(config: Dict[str, Any]) -> Any:
     key = jax.random.PRNGKey(seed)
     key, init_key, morph_init_key = jax.random.split(key, 3)
     depth_shape = None
-    if pcfg["type"] == "cnn_gru" and hasattr(env, "cam_height"):
-        pool = getattr(env, "cam_pool", 2)
-        depth_shape = (env.cam_height // pool, env.cam_width // pool)
+    if pcfg["type"] == "cnn_gru" and hasattr(env, "depth_shape"):
+        depth_shape = env.depth_shape
     policy_params = init_params(policy, init_key, env.obs_dim, depth_shape=depth_shape)
 
     # -- Optimiser ----------------------------------------------------------

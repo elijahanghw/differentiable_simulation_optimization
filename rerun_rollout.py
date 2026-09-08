@@ -178,6 +178,93 @@ def _log_drone(t, state, prop_pos_body, mount_points_body, disc_offsets, thrust_
 
 
 # ---------------------------------------------------------------------------
+# Sensor frustum — the volume the depth camera / ToF array actually sees
+# ---------------------------------------------------------------------------
+
+def _uv_polyline(uv, tan_h, tan_v, far, n_seg=1):
+    """
+    Body-frame points for a polyline given in normalized image coords.
+
+    `uv` is a list of (u, v) waypoints, each in [-1, 1] over the full frame —
+    the same parametrization JADS/depth_render/camera.py:generate_rays uses,
+    where a ray is  u·tan_h·right + v·tan_v·cam_up + forward  with right = body
+    +Y and cam_up = body −Z. Every point is pushed out to Euclidean range `far`,
+    because apply_sensor_noise saturates *ray distance*, not forward depth — so
+    the far surface of the sensor's reach is a spherical cap, not a plane, and
+    the wireframe bows to match. `n_seg` subdivides each segment so that bow is
+    visible rather than chorded away.
+    """
+    uv  = np.asarray(uv, dtype=np.float64)          # (K, 2) waypoints
+    seg = [np.linspace(a, b, n_seg + 1)[:-1] for a, b in zip(uv[:-1], uv[1:])]
+    pts = np.concatenate(seg + [uv[-1:]], axis=0)   # (K-1)*n_seg + 1 points
+    d   = np.stack([np.ones(len(pts)), pts[:, 0] * tan_h, -pts[:, 1] * tan_v], axis=1)
+    return d / np.linalg.norm(d, axis=1, keepdims=True) * far
+
+
+def _frustum_strips(fov_deg, aspect, far, grid=None, n_seg=6):
+    """
+    Wireframe of the sensor frustum, in the body frame, as rerun line strips.
+
+    Args:
+        fov_deg: horizontal FOV; the vertical half-angle is tan_h / aspect,
+                 exactly as generate_rays derives it.
+        aspect:  ray-grid width / height (1.0 for a square ToF array).
+        far:     how far the pyramid reaches — pass cam_max_range, the distance
+                 at which the sensor saturates.
+        grid:    (rows, cols) of the observation the policy receives, to draw
+                 one cell per pixel / ToF zone. None draws only the outline.
+
+    Returns:
+        (edges, cells) — two lists of (N, 3) body-frame polylines. The apex of
+        every edge is the body origin, which is where the sim mounts the sensor.
+    """
+    tan_h = float(np.tan(np.radians(fov_deg / 2.0)))
+    tan_v = tan_h / aspect
+    corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)]
+
+    edges = [
+        np.stack([np.zeros(3), _uv_polyline([c], tan_h, tan_v, far)[0]])
+        for c in corners
+    ]
+    # Far outline, closed. Subdivided so it follows the spherical cap.
+    edges.append(_uv_polyline(corners + [corners[0]], tan_h, tan_v, far, n_seg))
+
+    cells = []
+    if grid is not None:
+        rows, cols = grid
+        for i in range(1, cols):
+            u = -1.0 + 2.0 * i / cols
+            cells.append(_uv_polyline([(u, -1.0), (u, 1.0)], tan_h, tan_v, far, n_seg))
+        for j in range(1, rows):
+            v = -1.0 + 2.0 * j / rows
+            cells.append(_uv_polyline([(-1.0, v), (1.0, v)], tan_h, tan_v, far, n_seg))
+    return edges, cells
+
+
+def _log_frustum(t, state, frustum, dt):
+    """
+    Log the frustum at `state`'s pose.
+
+    Callers pass the pose the *displayed* depth frame was rendered from, not
+    the live one: the sensor runs at cam_hz while the policy runs at 1/dt, so
+    between renders the drone has moved on from where the held frame was taken.
+    Drawing the live pose would put the wireframe up to frame_skip steps ahead
+    of the image it is meant to be checked against.
+    """
+    rr.set_time("time", duration=t * dt)
+    pos   = state[0:3]
+    R     = np.array(quat_to_rotmat(state[6:10]))
+    edges, cells = frustum
+    rr.log("drone/fov", rr.LineStrips3D(
+        [pos + s @ R.T for s in edges], colors=[[255, 170, 60, 190]], radii=0.004,
+    ))
+    if cells:
+        rr.log("drone/fov_cells", rr.LineStrips3D(
+            [pos + s @ R.T for s in cells], colors=[[255, 170, 60, 70]], radii=0.0015,
+        ))
+
+
+# ---------------------------------------------------------------------------
 # Navigate-specific: scene geometry
 # ---------------------------------------------------------------------------
 
@@ -487,6 +574,10 @@ def run_rollout(env, policy, policy_params, morph_params, key, steps):
     states     = [np.array(state)]
     last_vis_depth = np.array(vis_depth_fn(state)) if has_vis_depth else None
     vis_depths = [last_vis_depth] if has_vis_depth else None
+    # Which state each held frame was rendered from, so the frustum can be drawn
+    # at the pose the displayed depth actually came from rather than the live one.
+    last_vis_idx = 0
+    vis_idx      = [0] if has_vis_depth else None
 
     hidden = policy.init_hidden() if has_hidden else None
 
@@ -508,9 +599,11 @@ def run_rollout(env, policy, policy_params, morph_params, key, steps):
         if has_vis_depth:
             if (t + 1) % frame_skip == 0:
                 last_vis_depth = np.array(vis_depth_fn(state))
+                last_vis_idx   = t + 1
             vis_depths.append(last_vis_depth)
+            vis_idx.append(last_vis_idx)
 
-    return np.stack(states), vis_depths
+    return np.stack(states), vis_depths, vis_idx
 
 
 # ---------------------------------------------------------------------------
@@ -594,8 +687,22 @@ def main():
     print(f"Seed: {seed}  |  steps: {steps}")
     key = jax.random.PRNGKey(seed)
     print("Running rollout…")
-    states, vis_depths = run_rollout(env, policy, policy_params, morph_params, key, steps)
+    states, vis_depths, vis_idx = run_rollout(env, policy, policy_params, morph_params, key, steps)
     print(f"  {len(states)} steps collected")
+
+    # Sensor frustum: the pyramid the depth image / ToF zone grid is taken over,
+    # drawn out to the range at which the sensor saturates. Subdivided into one
+    # cell per pixel when the observation is coarse enough for that to read —
+    # (8, 8) ToF zones or a 12×16 pooled image — so a wireframe cell can be
+    # matched against the corresponding pixel in the depth view.
+    frustum = None
+    if vis_depths is not None and hasattr(env, "cam_fov_deg"):
+        grid = getattr(env, "depth_shape", None)
+        if grid is not None and max(grid) > 16:
+            grid = None
+        frustum = _frustum_strips(
+            env.cam_fov_deg, env.cam_width / env.cam_height, env.cam_max_range, grid=grid,
+        )
 
     prop_pos_body, mount_points_body, disc_offsets, thrust_body = drone_geometry
 
@@ -637,6 +744,8 @@ def main():
             rr.log("drone/depth", rr.Image(
                 np.clip(vis_depths[t] / env.cam_max_range, 0.0, 1.0).astype(np.float32)
             ))
+            if frustum is not None:
+                _log_frustum(t, states[vis_idx[t]], frustum, env.dt)
 
         if hasattr(env, "scene_cfg"):
             rr.set_time("time", duration=t * env.dt)

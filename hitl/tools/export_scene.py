@@ -154,11 +154,32 @@ def camera_block(depth_camera: dict, pool: int) -> dict:
     The camera the policy was trained with. `norm_*` mirror the constants
     hardcoded in NavigateReal._get_processed_depth:
         3.0 / clip(raw, 0.3, max_range) - 0.6
+
+    A `type: tof` block (an 8×8 VL53L8CX-class array — JADS/depth_render/tof.py)
+    needs no ToF-specific code on the C++ side: normalization is monotonically
+    decreasing in distance, so max-pooling the normalized supersampled grid by S
+    *is* the sensor's per-zone nearest-reflector reduction. Trace zones×S rays
+    per side and pool by S and hitl/src/render.cpp reproduces the sim exactly.
     """
+    if str(depth_camera.get("type", "depth")).lower() == "tof":
+        zones  = int(depth_camera.get("zones", 8))
+        zone_h = int(depth_camera.get("zones_h", zones))
+        zone_w = int(depth_camera.get("zones_w", zones))
+        ss     = int(depth_camera.get("supersample", 4))
+        agg    = str(depth_camera.get("zone_agg", "min")).lower()
+        if agg != "min":
+            raise SystemExit(
+                f"depth_camera.zone_agg='{agg}' has no equivalent in the C++ "
+                f"renderer, which max-pools; retrain with zone_agg: min to export")
+        pool, width, height = ss, zone_w * ss, zone_h * ss
+    else:
+        width  = int(depth_camera.get("width", 64))
+        height = int(depth_camera.get("height", 48))
+
     return {
         "fov_deg":        float(depth_camera.get("fov_deg", 90.0)),
-        "width":          int(depth_camera.get("width", 64)),
-        "height":         int(depth_camera.get("height", 48)),
+        "width":          width,
+        "height":         height,
         "min_range":      float(depth_camera.get("min_range", 0.2)),
         "max_range":      float(depth_camera.get("max_range", 8.0)),
         "quantization_m": float(depth_camera.get("quantization_m", 0.001)),

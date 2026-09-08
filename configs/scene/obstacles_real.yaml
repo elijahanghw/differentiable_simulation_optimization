@@ -28,11 +28,11 @@ arena_x_min:  -3.0
 arena_x_max:  3.0
 arena_y_min: -3.0
 arena_y_max:  3.0
-arena_z_min: -4.0
+arena_z_min: -3.0
 arena_z_max: -0.0
 
 n_spheres:  8
-n_boxes:    8
+n_boxes:    10
 n_capsules: 8
 
 sphere_r_min: 0.20

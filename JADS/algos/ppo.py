@@ -294,9 +294,8 @@ def train(config: Dict[str, Any]) -> Any:
     key = jax.random.PRNGKey(seed)
     key, actor_key, critic_key = jax.random.split(key, 3)
     depth_shape = None
-    if has_depth and hasattr(env, "cam_height"):
-        pool = getattr(env, "cam_pool", 2)
-        depth_shape = (env.cam_height // pool, env.cam_width // pool)
+    if has_depth and hasattr(env, "depth_shape"):
+        depth_shape = env.depth_shape
     params = {
         "actor":   init_params(actor,  actor_key, env.obs_dim, depth_shape=depth_shape),
         "critic":  init_params(critic, critic_key, critic_in_dim,

@@ -9,6 +9,7 @@ from ..drone_physics.quat_math import euler_to_quat, quat_to_euler, quat_to_rotm
 from ..scene.scene import SceneConfig
 
 from JADS.depth_render.renderer import render_depth, apply_sensor_noise  # depth_render/renderer.py
+from JADS.depth_render.tof import zone_reduce                            # depth_render/tof.py
 from JADS.depth_render.primitives import (                               # depth_render/primitives.py
     point_sphere_dist, point_aabb_dist, point_obb_dist,
     point_capsule_dist, point_plane_dist,
@@ -73,6 +74,19 @@ class Navigate:
     cam_quantization_m: float = 0.001
     cam_hz:            float = 50.0   # depth-camera update rate; defaults to 1/dt (no frame skip)
 
+    # ---- ToF sensor (VL53L8CX-class multizone array) -----------------------
+    # Selected with `depth_camera: {type: tof, ...}`; see depth_render/tof.py.
+    # The zone grid replaces the depth image as the policy's visual input —
+    # each zone reports the nearest surface in its cone, found by tracing
+    # tof_supersample² sub-rays. cam_width/cam_height/cam_pool are *derived*
+    # from the zone grid in __init__, never configured, so everything reading
+    # them (depth_shape, the HITL export) stays consistent.
+    sensor_type:      str = "depth"   # "depth" | "tof"
+    tof_zones_h:      int = 8
+    tof_zones_w:      int = 8
+    tof_supersample:  int = 4         # sub-rays per zone edge (S² per zone)
+    tof_zone_agg:     str = "min"     # "min" (nearest reflector) | "mean"
+
     # ---- Morphology --------------------------------------------------------
     l_min:     float = 0.06;        l_max:     float = 0.14;        l_default:     float = 0.10
     # l_min:     float = 0.06;        l_max:     float = 0.15;        l_default:     float = 0.10
@@ -127,19 +141,41 @@ class Navigate:
 
         if depth_camera is not None:
             dc = depth_camera
+            self.sensor_type        = str(  dc.get("type",           self.sensor_type)).lower()
             self.cam_fov_deg        = float(dc.get("fov_deg",        self.cam_fov_deg))
-            self.cam_width          = int(  dc.get("width",          self.cam_width))
-            self.cam_height         = int(  dc.get("height",         self.cam_height))
             self.cam_min_range      = float(dc.get("min_range",      self.cam_min_range))
             self.cam_max_range      = float(dc.get("max_range",      self.cam_max_range))
             self.cam_quantization_m = float(dc.get("quantization_m", self.cam_quantization_m))
             self.cam_hz             = float(dc.get("cam_hz",         self.cam_hz))
+
+            if self.sensor_type == "depth":
+                self.cam_width      = int(  dc.get("width",          self.cam_width))
+                self.cam_height     = int(  dc.get("height",         self.cam_height))
+                self.cam_pool       = int(  dc.get("pool",           self.cam_pool))
+            elif self.sensor_type == "tof":
+                zones = int(dc.get("zones", self.tof_zones_h))
+                self.tof_zones_h     = int(dc.get("zones_h", zones))
+                self.tof_zones_w     = int(dc.get("zones_w", zones))
+                self.tof_supersample = int(dc.get("supersample", self.tof_supersample))
+                self.tof_zone_agg    = str(dc.get("zone_agg", self.tof_zone_agg)).lower()
+                # The ray grid is the zone grid, supersampled.
+                self.cam_height = self.tof_zones_h * self.tof_supersample
+                self.cam_width  = self.tof_zones_w * self.tof_supersample
+                self.cam_pool   = self.tof_supersample
+            else:
+                raise ValueError(
+                    f"depth_camera.type '{self.sensor_type}' — expected 'depth' or 'tof'")
 
         if self.scene_cfg.procedural:
             self.scene_cfg.cell_size = self.cam_max_range
 
         self.state_dim = 22 + self.scene_cfg.scene_dim
         self._gd_factor = float(self.grad_decay ** self.dt)
+
+        if self.cam_height % self.cam_pool or self.cam_width % self.cam_pool:
+            raise ValueError(
+                f"camera {self.cam_height}×{self.cam_width} is not divisible by "
+                f"pool {self.cam_pool}")
 
         # Depth camera runs slower than the physics/policy loop (dt): render a
         # fresh frame every `frame_skip` steps and hold it (zero-order hold)
@@ -266,37 +302,52 @@ class Navigate:
                     to avoid re-sampling the procedural obstacle neighbourhood.
 
         Returns:
-            (cam_height, cam_width) float32 — depth in metres.
+            float32 — distance in metres, (cam_height, cam_width) for a depth
+            camera and (tof_zones_h, tof_zones_w) for a ToF sensor, where the
+            tof_supersample² sub-rays traced through each zone have already
+            been reduced to one distance.
             0 = closer than cam_min_range.
             cam_max_range = no-hit or saturated.
         """
         arrays = arrays if arrays is not None else self._unpack_scene(state)
+        depth = render_depth(
+            position         = state[0:3],
+            quaternion       = state[6:10],
+            fov_deg          = self.cam_fov_deg,
+            width            = self.cam_width,
+            height           = self.cam_height,
+            sphere_centers   = arrays["sphere_centers"],
+            sphere_radii     = arrays["sphere_radii"],
+            box_centers      = arrays["box_centers"],
+            box_half_extents = arrays["box_half_extents"],
+            cylinder_centers = arrays["cylinder_centers"],
+            cylinder_axes    = arrays["cylinder_axes"],
+            cylinder_hh      = arrays["cylinder_hh"],
+            cylinder_radii   = arrays["cylinder_radii"],
+            obb_centers      = arrays["obb_centers"],
+            obb_quaternions  = arrays["obb_quats"],
+            obb_half_extents = arrays["obb_half_extents"],
+        )
+        if self.sensor_type == "tof":
+            depth = zone_reduce(
+                depth, self.tof_supersample, self.cam_max_range, self.tof_zone_agg,
+            )
         return apply_sensor_noise(
-            render_depth(
-                position         = state[0:3],
-                quaternion       = state[6:10],
-                fov_deg          = self.cam_fov_deg,
-                width            = self.cam_width,
-                height           = self.cam_height,
-                sphere_centers   = arrays["sphere_centers"],
-                sphere_radii     = arrays["sphere_radii"],
-                box_centers      = arrays["box_centers"],
-                box_half_extents = arrays["box_half_extents"],
-                cylinder_centers = arrays["cylinder_centers"],
-                cylinder_axes    = arrays["cylinder_axes"],
-                cylinder_hh      = arrays["cylinder_hh"],
-                cylinder_radii   = arrays["cylinder_radii"],
-                obb_centers      = arrays["obb_centers"],
-                obb_quaternions  = arrays["obb_quats"],
-                obb_half_extents = arrays["obb_half_extents"],
-            ),
+            depth,
             min_range      = self.cam_min_range,
             max_range      = self.cam_max_range,
             quantization_m = self.cam_quantization_m,
         )
 
     def get_vis_depth(self, state: jnp.ndarray, width: int = 320, height: int = 240) -> jnp.ndarray:
-        """Render depth at arbitrary resolution for visualization (no pooling, no normalization)."""
+        """Render depth at arbitrary resolution for visualization (no pooling, no normalization).
+
+        A ToF sensor has no image behind its zone grid, so `width`/`height` are
+        ignored there and the (tof_zones_h, tof_zones_w) frame the policy
+        actually receives is returned instead.
+        """
+        if self.sensor_type == "tof":
+            return self._get_depth(state)
         arrays = self._unpack_scene(state)
         return apply_sensor_noise(
             render_depth(
@@ -322,13 +373,27 @@ class Navigate:
             quantization_m = self.cam_quantization_m,
         )
 
+    @property
+    def depth_shape(self) -> tuple:
+        """Shape of the visual observation the policy sees — the CNN input.
+
+        Depth camera: the pooled image, e.g. (48, 64) / 4 → (12, 16).
+        ToF sensor:   the zone grid, e.g. (8, 8) — cam_* are the supersampled
+                      ray grid and cam_pool is the supersample factor, so the
+                      same division lands on the zones.
+        """
+        return (self.cam_height // self.cam_pool, self.cam_width // self.cam_pool)
+
     def _get_processed_depth(self, state, arrays: dict = None):
         raw   = self._get_depth(state, arrays=arrays)
         normd = 3.0 / jnp.clip(raw, 0.3, self.cam_max_range) - 0.6
-        # 4×4 max-pool: (48, 64) → (12, 16)
+        if self.sensor_type == "tof":
+            return normd    # _get_depth already reduced the sub-rays to zones
+        # max-pool by cam_pool: (48, 64) → (12, 16) at the default 4
+        pool = self.cam_pool
         return jax.lax.reduce_window(
             normd, -jnp.inf, jax.lax.max,
-            window_dimensions=(4, 4), window_strides=(4, 4), padding="VALID",
+            window_dimensions=(pool, pool), window_strides=(pool, pool), padding="VALID",
         )
     
     def _get_nearest_obstacle_dist(self, state, motor_positions_world=None, arrays: dict = None):
