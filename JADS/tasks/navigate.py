@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 from ..drone_physics.dynamics import forward_euler, semi_implicit_euler, rk4, _gdecay
 from ..drone_physics.morphology import morphology, PROP_DIAMETER
-from ..drone_physics.quat_math import euler_to_quat, quat_to_euler, quat_to_rotmat
+from ..drone_physics.quat_math import euler_to_quat, quat_to_euler, quat_to_rotmat, quat_mul
 from ..scene.scene import SceneConfig
 
 from JADS.depth_render.renderer import render_depth, apply_sensor_noise  # depth_render/renderer.py
@@ -73,6 +73,12 @@ class Navigate:
     cam_max_range:     float = 8.0
     cam_quantization_m: float = 0.001
     cam_hz:            float = 50.0   # depth-camera update rate; defaults to 1/dt (no frame skip)
+    # Fixed mount pitch, degrees. +ve = boresight tilted nose-up, applied in the
+    # body's own local frame (ZYX, as euler_to_quat) so it holds regardless of
+    # the drone's absolute attitude. 0 = boresight along body +X, unchanged
+    # from every config written before this option existed. Static — not a
+    # learnable parameter, just a config-time camera mount angle.
+    cam_pitch_deg:     float = 0.0
 
     # ---- ToF sensor (VL53L8CX-class multizone array) -----------------------
     # Selected with `depth_camera: {type: tof, ...}`; see depth_render/tof.py.
@@ -147,6 +153,7 @@ class Navigate:
             self.cam_max_range      = float(dc.get("max_range",      self.cam_max_range))
             self.cam_quantization_m = float(dc.get("quantization_m", self.cam_quantization_m))
             self.cam_hz             = float(dc.get("cam_hz",         self.cam_hz))
+            self.cam_pitch_deg      = float(dc.get("pitch_deg",      self.cam_pitch_deg))
 
             if self.sensor_type == "depth":
                 self.cam_width      = int(  dc.get("width",          self.cam_width))
@@ -181,6 +188,22 @@ class Navigate:
         # fresh frame every `frame_skip` steps and hold it (zero-order hold)
         # on the steps in between.
         self.frame_skip = max(1, round(1.0 / (self.dt * self.cam_hz)))
+
+        # Precomputed once: cam_pitch_deg is a static config value, not a
+        # per-step quantity, so there's no reason to rebuild this every render.
+        self._cam_tilt_quat = euler_to_quat(0.0, jnp.radians(self.cam_pitch_deg), 0.0)
+
+    def _cam_quat(self, state: jnp.ndarray) -> jnp.ndarray:
+        """Camera-frame quaternion: body attitude, tilted by cam_pitch_deg.
+
+        Composed on the right (body ⊗ tilt), so the pitch is applied in the
+        body's own local frame — the boresight sits cam_pitch_deg above/below
+        body +X regardless of the drone's absolute attitude, not a fixed
+        world-frame angle.
+        """
+        if self.cam_pitch_deg == 0.0:
+            return state[6:10]
+        return quat_mul(state[6:10], self._cam_tilt_quat)
 
     # -----------------------------------------------------------------------
     # Reset
@@ -312,7 +335,7 @@ class Navigate:
         arrays = arrays if arrays is not None else self._unpack_scene(state)
         depth = render_depth(
             position         = state[0:3],
-            quaternion       = state[6:10],
+            quaternion       = self._cam_quat(state),
             fov_deg          = self.cam_fov_deg,
             width            = self.cam_width,
             height           = self.cam_height,
@@ -352,7 +375,7 @@ class Navigate:
         return apply_sensor_noise(
             render_depth(
                 position         = state[0:3],
-                quaternion       = state[6:10],
+                quaternion       = self._cam_quat(state),
                 fov_deg          = self.cam_fov_deg,
                 width            = width,
                 height           = height,

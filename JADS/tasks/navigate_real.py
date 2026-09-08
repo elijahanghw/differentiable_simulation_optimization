@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 from ..drone_physics.dynamics_real import forward_euler, semi_implicit_euler, rk4, _gdecay
 from ..drone_physics import randomization
-from ..drone_physics.quat_math import euler_to_quat, quat_to_euler, quat_to_rotmat
+from ..drone_physics.quat_math import euler_to_quat, quat_to_euler, quat_to_rotmat, quat_mul
 from ..scene.scene import SceneConfig
 
 from JADS.depth_render.renderer import render_depth, apply_sensor_noise  # depth_render/renderer.py
@@ -89,6 +89,12 @@ class NavigateReal:
     cam_max_range:     float = 8.0
     cam_quantization_m: float = 0.001
     cam_hz:            float = 50.0   # depth-camera update rate; defaults to 1/dt (no frame skip)
+    # Fixed mount pitch, degrees. +ve = boresight tilted nose-up, applied in the
+    # body's own local frame (ZYX, as euler_to_quat) so it holds regardless of
+    # the drone's absolute attitude. 0 = boresight along body +X, unchanged
+    # from every config written before this option existed. Static — not a
+    # learnable parameter, just a config-time camera mount angle.
+    cam_pitch_deg:     float = 0.0
 
     # ---- ToF sensor (VL53L8CX-class multizone array) -----------------------
     # Selected with `depth_camera: {type: tof, ...}`; see depth_render/tof.py.
@@ -192,6 +198,7 @@ class NavigateReal:
             self.cam_max_range      = float(dc.get("max_range",      self.cam_max_range))
             self.cam_quantization_m = float(dc.get("quantization_m", self.cam_quantization_m))
             self.cam_hz             = float(dc.get("cam_hz",         self.cam_hz))
+            self.cam_pitch_deg      = float(dc.get("pitch_deg",      self.cam_pitch_deg))
 
             if self.sensor_type == "depth":
                 self.cam_width      = int(  dc.get("width",          self.cam_width))
@@ -226,6 +233,22 @@ class NavigateReal:
         # fresh frame every `frame_skip` steps and hold it (zero-order hold)
         # on the steps in between.
         self.frame_skip = max(1, round(1.0 / (self.dt * self.cam_hz)))
+
+        # Precomputed once: cam_pitch_deg is a static config value, not a
+        # per-step quantity, so there's no reason to rebuild this every render.
+        self._cam_tilt_quat = euler_to_quat(0.0, jnp.radians(self.cam_pitch_deg), 0.0)
+
+    def _cam_quat(self, state: jnp.ndarray) -> jnp.ndarray:
+        """Camera-frame quaternion: body attitude, tilted by cam_pitch_deg.
+
+        Composed on the right (body ⊗ tilt), so the pitch is applied in the
+        body's own local frame — the boresight sits cam_pitch_deg above/below
+        body +X regardless of the drone's absolute attitude, not a fixed
+        world-frame angle.
+        """
+        if self.cam_pitch_deg == 0.0:
+            return state[6:10]
+        return quat_mul(state[6:10], self._cam_tilt_quat)
 
     # -----------------------------------------------------------------------
     # Reset
@@ -363,7 +386,7 @@ class NavigateReal:
         arrays = arrays if arrays is not None else self._unpack_scene(state)
         depth = render_depth(
             position         = state[0:3],
-            quaternion       = state[6:10],
+            quaternion       = self._cam_quat(state),
             fov_deg          = self.cam_fov_deg,
             width            = self.cam_width,
             height           = self.cam_height,
@@ -403,7 +426,7 @@ class NavigateReal:
         return apply_sensor_noise(
             render_depth(
                 position         = state[0:3],
-                quaternion       = state[6:10],
+                quaternion       = self._cam_quat(state),
                 fov_deg          = self.cam_fov_deg,
                 width            = width,
                 height           = height,
@@ -560,20 +583,41 @@ class NavigateReal:
         loss_vel  = jnp.mean(jnp.sum(vel   ** 2, axis=-1))
         loss_rate = jnp.mean(jnp.sum(omega ** 2, axis=-1))
 
-        # Heading alignment: body x-axis (forward) should point toward target
+        # Heading alignment: the *sensor* boresight — not necessarily body
+        # +X — should point toward target. With cam_pitch_deg == 0 this is
+        # exactly body +X, unchanged from before. With a tilted mount, aiming
+        # the sensor rather than the body decouples this constraint from the
+        # nose-down pitch fast forward flight needs: a mount tilted up by
+        # cam_pitch_deg cancels a body pitched down by the same amount, so the
+        # sensor can stay on the target while the body pitches for speed —
+        # aiming the body itself would instead fight that pitch directly.
         w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
         fwd = jnp.stack([
             1.0 - 2.0 * (y**2 + z**2),
             2.0 * (x*y + z*w),
             2.0 * (x*z - y*w),
-        ], axis=-1)  # (B, T, 3) — body x-axis in world frame
+        ], axis=-1)  # (B, T, 3) — body x-axis (forward) in world frame
+
+        if self.cam_pitch_deg == 0.0:
+            cam_fwd = fwd
+        else:
+            down = jnp.stack([
+                2.0 * (x*z + y*w),
+                2.0 * (y*z - x*w),
+                1.0 - 2.0 * (x**2 + y**2),
+            ], axis=-1)  # (B, T, 3) — body z-axis (down) in world frame
+            p = jnp.radians(self.cam_pitch_deg)
+            # Exact for a pure-pitch tilt: cam_quat = quat_mul(body_quat, tilt),
+            # so cam_fwd = cos(p)*body_fwd - sin(p)*body_down (verified against
+            # the full quaternion composition to float32 precision).
+            cam_fwd = jnp.cos(p) * fwd - jnp.sin(p) * down
 
         to_target = target - pos
         to_target = to_target / jnp.sqrt(
             jnp.maximum(jnp.sum(to_target**2, axis=-1, keepdims=True), 1e-8)
         )
 
-        cos_sim = jnp.sum(fwd * to_target, axis=-1)  # (B, T)
+        cos_sim = jnp.sum(cam_fwd * to_target, axis=-1)  # (B, T)
         loss_heading = jnp.mean((1.0 - cos_sim) ** 2)
 
         dist_diff = jnp.diff(dist, axis=1)                                           # (B, T-1)

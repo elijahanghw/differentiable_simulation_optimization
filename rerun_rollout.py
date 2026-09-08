@@ -241,19 +241,22 @@ def _frustum_strips(fov_deg, aspect, far, grid=None, n_seg=6):
     return edges, cells
 
 
-def _log_frustum(t, state, frustum, dt):
+def _log_frustum(t, pos, quat, frustum, dt):
     """
-    Log the frustum at `state`'s pose.
+    Log the frustum at the given camera pose.
 
     Callers pass the pose the *displayed* depth frame was rendered from, not
     the live one: the sensor runs at cam_hz while the policy runs at 1/dt, so
     between renders the drone has moved on from where the held frame was taken.
     Drawing the live pose would put the wireframe up to frame_skip steps ahead
     of the image it is meant to be checked against.
+
+    `quat` is the camera's own orientation — env._cam_quat(state) when the env
+    has a fixed mount pitch (cam_pitch_deg), not necessarily the raw body
+    attitude — so the wireframe keeps matching what was actually rendered.
     """
     rr.set_time("time", duration=t * dt)
-    pos   = state[0:3]
-    R     = np.array(quat_to_rotmat(state[6:10]))
+    R = np.array(quat_to_rotmat(quat))
     edges, cells = frustum
     rr.log("drone/fov", rr.LineStrips3D(
         [pos + s @ R.T for s in edges], colors=[[255, 170, 60, 190]], radii=0.004,
@@ -745,7 +748,9 @@ def main():
                 np.clip(vis_depths[t] / env.cam_max_range, 0.0, 1.0).astype(np.float32)
             ))
             if frustum is not None:
-                _log_frustum(t, states[vis_idx[t]], frustum, env.dt)
+                fstate = states[vis_idx[t]]
+                cam_quat = getattr(env, "_cam_quat", lambda s: s[6:10])(fstate)
+                _log_frustum(t, fstate[0:3], cam_quat, frustum, env.dt)
 
         if hasattr(env, "scene_cfg"):
             rr.set_time("time", duration=t * env.dt)
