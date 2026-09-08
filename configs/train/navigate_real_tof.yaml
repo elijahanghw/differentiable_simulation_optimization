@@ -24,7 +24,7 @@ env:
   smooth_action_weight: 0.01   # MSE between consecutive motor commands
   b1: 1.0
   b2: 32.0
-  max_velocity: 5.0
+  max_velocity: 99.0
 
   # ---- Drone initial state bounds ----------------------------------------
   init_x_min: -3.5
@@ -90,6 +90,7 @@ depth_camera:
   supersample: 4        # sub-rays per zone edge → 16 rays/zone, 1024 total
   zone_agg: min         # nearest reflector in the cone (what the HITL port does)
   fov_deg: 45.0         # degrees per side — ST quotes a 65° diagonal square FoV
+  pitch_deg: 20.0        # deg — fixed mount tilt, +ve = boresight nose-up (body-local)
   min_range: 0.1        # m  — closer than this → 0 (blind zone)
   max_range: 4.0        # m  — 400 cm datasheet max; farther / no-hit saturates
   quantization_m: 0.001 # m  — the sensor reports mm as uint16
@@ -99,5 +100,5 @@ depth_camera:
 # Logging
 # -----------------------------------------------------------------------
 logging:
-  csv_path: logs/navigate_real_tof.csv
-  checkpoint_path: checkpoints/navigate_real_tof.pkl
+  csv_path: logs/navigate_real_tof_20.csv
+  checkpoint_path: checkpoints/navigate_real_tof_20.pkl
