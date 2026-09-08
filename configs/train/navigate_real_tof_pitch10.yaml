@@ -1,0 +1,104 @@
+# navigate_real_tof.yaml with the ToF mount fixed pitch cam_pitch_deg above
+# body-forward: part of a 3-way pitch experiment (0/10/20 deg) comparing max
+# speed, avg speed, time to target, and crash rate. Identical to
+# navigate_real_tof.yaml in every other respect.
+# -----------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------
+env:
+  name: navigate_real
+  dt: 0.01                # physics/policy timestep (100 Hz loop)
+  integrator: semi_implicit_euler
+  drone: ../drone/2inchwhoop.yaml   # path is resolved relative to this file
+  grad_decay: 0.7
+
+  # ---- Loss weights -------------------------------------------------------
+  xy_weight:        1.0
+  z_weight:         2.0
+  vel_weight:       0.2
+  max_vel_weight:   5.0
+  rate_weight:      0.1
+  collision_weight: 10.0
+  obj_weight:       8.0
+  heading_weight:   30.0
+  smooth_action_weight: 0.01   # MSE between consecutive motor commands
+  b1: 1.0
+  b2: 32.0
+  max_velocity: 5.0
+
+  # ---- Drone initial state bounds ----------------------------------------
+  init_x_min: -3.5
+  init_x_max: -3.0
+  init_y_min: -2.0
+  init_y_max: 2.0
+  init_z_min: -1.6
+  init_z_max: -1.4
+
+  # ---- Target spawn bounds -----------------------------------------------
+  target_x_min: 3.0
+  target_x_max: 3.5
+  target_y_min: -1.0
+  target_y_max: 1.0
+  target_z_min: -1.5
+  target_z_max: -1.5
+
+  # ---- Scene (random obstacles) -----------------------------------------
+  scene: ../scene/obstacles_real.yaml
+
+# -----------------------------------------------------------------------
+# Policy
+# -----------------------------------------------------------------------
+# The conv stack is unchanged from navigate_real.yaml — Flax convs pad SAME,
+# so 8×8 → 4×4 at the stride-2 layer and stays 4×4 through the rest. Recurrence
+# matters even more here than with a depth image: 64 zones over a 45° cone is
+# far less of the room per frame, so the GRU has to carry what just left view.
+policy:
+  type: cnn_gru
+  squash_output: false
+  conv_features: [32, 64, 128]
+  kernel_sizes: [[2, 2], [3, 3], [3, 3]]
+  strides: [[2, 2], [1, 1], [1, 1]]
+  proj_dim: 64
+  leaky_slope: 0.05
+  hidden_size: 64
+
+# -----------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------
+training:
+  epochs: 3000
+  horizon: 200
+  # ---- Truncated BPTT (persistent carry across epochs) -------------------
+  persistent_carry: true   # thread (state, obs, hidden, age, params) across epochs
+  reset_on_crash:   true   # per-element in-scan reset when dist < 0 (collision)
+  max_episode_len:  1000   # force-reset an element after this many steps (0 = unbounded)
+  batch_size: 64
+  lr: 1.0e-3
+  lr_min: 1.0e-4
+  grad_clip: 1.0
+  log_interval: 50
+
+# -----------------------------------------------------------------------
+# ToF sensor — VL53L8CX, 8×8 multizone array
+# -----------------------------------------------------------------------
+# Each zone is the nearest surface inside its ~5.6° cone, taken as the min over
+# supersample² traced sub-rays. width/height/pool are derived (8*4 = 32×32 rays,
+# pooled by 4), so they are not configured here. See JADS/depth_render/tof.py.
+depth_camera:
+  type: tof
+  zones: 8              # 8×8 zones; the sensor also has a 4×4 / 60 Hz mode
+  supersample: 4        # sub-rays per zone edge → 16 rays/zone, 1024 total
+  zone_agg: min         # nearest reflector in the cone (what the HITL port does)
+  fov_deg: 45.0         # degrees per side — ST quotes a 65° diagonal square FoV
+  pitch_deg: 10.0        # deg — fixed mount tilt, +ve = boresight nose-up (body-local)
+  min_range: 0.1        # m  — closer than this → 0 (blind zone)
+  max_range: 4.0        # m  — 400 cm datasheet max; farther / no-hit saturates
+  quantization_m: 0.001 # m  — the sensor reports mm as uint16
+  cam_hz: 15.0          # Hz — 8×8 mode caps at 15 Hz (dt=0.01 → frame_skip=7)
+
+# -----------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------
+logging:
+  csv_path: logs/navigate_real_tof_pitch10.csv
+  checkpoint_path: checkpoints/navigate_real_tof_pitch10.pkl
