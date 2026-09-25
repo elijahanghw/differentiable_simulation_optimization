@@ -19,7 +19,7 @@
 
 #define CNN_FOV_DEG      80.0f   // horizontal
 #define CNN_MIN_RANGE    0.3f   // below this the sensor reads 0
-#define CNN_MAX_RANGE    3.0f   // no hit / saturated
+#define CNN_MAX_RANGE    8.0f   // no hit / saturated
 #define CNN_QUANTIZE_DEPTH 1
 #define CNN_QUANT_M      0.001f
 #define CNN_NORM_NUM     3.0f   // v = NORM_NUM / clip(d, NORM_MIN, MAX) - NORM_OFF
